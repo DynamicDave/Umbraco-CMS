@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Net;
 using System.Security;
@@ -19,6 +20,7 @@ using UmbracoExamine.DataServices;
 using Examine;
 using System.IO;
 using System.Xml.Linq;
+using Lucene.Net.Store;
 using UmbracoExamine.LocalStorage;
 
 namespace UmbracoExamine
@@ -47,6 +49,7 @@ namespace UmbracoExamine
         /// <param name="indexPath"></param>
         /// <param name="dataService"></param>
         /// <param name="analyzer"></param>
+        /// <param name="async"></param>
         protected BaseUmbracoIndexer(IIndexCriteria indexerData, DirectoryInfo indexPath, IDataService dataService, Analyzer analyzer, bool async)
             : base(indexerData, indexPath, analyzer, async)
         {
@@ -59,20 +62,33 @@ namespace UmbracoExamine
 			DataService = dataService;
 		}
 
+        /// <summary>
+        /// Creates an NRT indexer
+        /// </summary>
+        /// <param name="indexerData"></param>
+        /// <param name="writer"></param>
+        /// <param name="async"></param>
+        /// <param name="dataService"></param>
+        protected BaseUmbracoIndexer(IIndexCriteria indexerData, IndexWriter writer, IDataService dataService, bool async) 
+            : base(indexerData, writer, async)
+        {
+            DataService = dataService;
+        }
+
         #endregion
 
         /// <summary>
         /// Used for unit tests
         /// </summary>
         internal static bool? DisableInitializationCheck = null;
-        private readonly LocalTempStorageIndexer _localTempStorageHelper = new LocalTempStorageIndexer();
+        private readonly LocalTempStorageIndexer _localTempStorageIndexer = new LocalTempStorageIndexer();
         private BaseLuceneSearcher _internalTempStorageSearcher = null;
 
         #region Properties
 
         public bool UseTempStorage
         {
-            get { return _localTempStorageHelper.LuceneDirectory != null; }
+            get { return _localTempStorageIndexer.LuceneDirectory != null; }
         }
 
         public string TempStorageLocation
@@ -80,7 +96,7 @@ namespace UmbracoExamine
             get
             {
                 if (UseTempStorage == false) return string.Empty;
-                return _localTempStorageHelper.TempPath;
+                return _localTempStorageIndexer.TempPath;
             }
         }
 
@@ -93,7 +109,7 @@ namespace UmbracoExamine
         /// Determines if the manager will call the indexing methods when content is saved or deleted as
         /// opposed to cache being updated.
         /// </summary>
-        public bool SupportUnpublishedContent { get; protected set; }
+        public bool SupportUnpublishedContent { get; protected internal set; }
 
         /// <summary>
         /// The data service used for retreiving and submitting data to the cms
@@ -160,23 +176,38 @@ namespace UmbracoExamine
 
             base.Initialize(name, config);
 
-            if (config["useTempStorage"] != null)
-            {
-                //Use the temp storage directory which will store the index in the local/codegen folder, this is useful
-                // for websites that are running from a remove file server and file IO latency becomes an issue
-                var attemptUseTempStorage = config["useTempStorage"].TryConvertTo<LocalStorageType>();
-                if (attemptUseTempStorage)
-                {
-                    
-                    var indexSet = IndexSets.Instance.Sets[IndexSetName];
-                    var configuredPath = indexSet.IndexPath;
+            //NOTES: useTempStorage is obsolete, tempStorageDirectory is obsolete, both have been superceded by Examine Core's IDirectoryFactory
+            //       tempStorageDirectory never actually got finished in Umbraco Core but accidentally got shipped (it's only enabled on the searcher
+            //       and not the indexer). So this whole block is just legacy
 
-                    _localTempStorageHelper.Initialize(config, configuredPath, base.GetLuceneDirectory(), IndexingAnalyzer, attemptUseTempStorage.Result);
+            //detect if a dir factory has been specified, if so then useTempStorage will not be used (deprecated)
+            if (config["directoryFactory"] == null && config["useTempStorage"] != null)
+            {
+                var fsDir = base.GetLuceneDirectory() as FSDirectory;
+                if (fsDir != null)
+                {
+                    //Use the temp storage directory which will store the index in the local/codegen folder, this is useful
+                    // for websites that are running from a remove file server and file IO latency becomes an issue
+                    var attemptUseTempStorage = config["useTempStorage"].TryConvertTo<LocalStorageType>();
+                    if (attemptUseTempStorage)
+                    {
+
+                        var indexSet = IndexSets.Instance.Sets[IndexSetName];
+                        var configuredPath = indexSet.IndexPath;
+
+                        _localTempStorageIndexer.Initialize(config, configuredPath, fsDir, IndexingAnalyzer, attemptUseTempStorage.Result);
+                    }
                 }
+               
             }
         }
 
         #endregion
+
+        /// <summary>
+        /// Used to aquire the internal searcher
+        /// </summary>
+        private readonly object _internalSearcherLocker = new object();
 
         protected override BaseSearchProvider InternalSearcher
         {
@@ -185,21 +216,29 @@ namespace UmbracoExamine
                 //if temp local storage is configured use that, otherwise return the default
                 if (UseTempStorage)
                 {
-                    //create one if one has not been created already
-                    return _internalTempStorageSearcher 
-                        ?? (_internalTempStorageSearcher = new LuceneSearcher(_localTempStorageHelper.LuceneDirectory, IndexingAnalyzer));
+                    if (_internalTempStorageSearcher == null)
+                    {
+                        lock (_internalSearcherLocker)
+                        {
+                            if (_internalTempStorageSearcher == null)
+                            {
+                                _internalTempStorageSearcher = new LuceneSearcher(GetIndexWriter(), IndexingAnalyzer);
+                            }
+                        }
+                    }
+                    return _internalTempStorageSearcher;
                 }
 
                 return base.InternalSearcher;
             }
         }
-
+        
         public override Lucene.Net.Store.Directory GetLuceneDirectory()
         {
             //if temp local storage is configured use that, otherwise return the default
             if (UseTempStorage)
             {
-                return _localTempStorageHelper.LuceneDirectory;
+                return _localTempStorageIndexer.LuceneDirectory;
             }
 
             return base.GetLuceneDirectory();
@@ -342,10 +381,11 @@ namespace UmbracoExamine
         /// <param name="type"></param>
         protected override void PerformIndexAll(string type)
         {
-            //NOTE: the logic below is ONLY used for published content, for media and members and non-published content, this method is overridden
+            //NOTE: the logic below is NOT used, this method is overridden
             // and we query directly against the umbraco service layer.
+            // This is here for backwards compat only.
 
-            if (!SupportedTypes.Contains(type))
+            if (SupportedTypes.Contains(type) == false)
                 return;
 
             var xPath = "//*[(number(@id) > 0 and (@isDoc or @nodeTypeAlias)){0}]"; //we'll add more filters to this below if needed
@@ -398,16 +438,11 @@ namespace UmbracoExamine
             AddNodesToIndex(xPath, type);
         }
 
-        /// <summary>
-        /// Returns an XDocument for the entire tree stored for the IndexType specified.
-        /// </summary>
-        /// <param name="xPath">The xpath to the node.</param>
-        /// <param name="type">The type of data to request from the data service.</param>
-        /// <returns>Either the Content or Media xml. If the type is not of those specified null is returned</returns>
+        [Obsolete("This method is not be used, it will be removed in future versions")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         protected virtual XDocument GetXDocument(string xPath, string type)
         {
-            //TODO: We need to get rid of this! it will now only ever be called for published content - but we're keeping the other
-            // logic here for backwards compatibility in case inheritors are calling this for some reason.
+            //TODO: We need to get rid of this! This does not get called by our code
 
             if (type == IndexTypes.Content)
             {
@@ -428,12 +463,9 @@ namespace UmbracoExamine
         }
         #endregion
 
-        #region Private
-        /// <summary>
-        /// Adds all nodes with the given xPath root.
-        /// </summary>
-        /// <param name="xPath">The x path.</param>
-        /// <param name="type">The type.</param>
+        
+        [Obsolete("This method is not be used, it will be removed in future versions")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         private void AddNodesToIndex(string xPath, string type)
         {
             // Get all the nodes of nodeTypeAlias == nodeTypeAlias
@@ -441,14 +473,21 @@ namespace UmbracoExamine
             if (xDoc != null)
             {
                 var rootNode = xDoc.Root;
-
-                AddNodesToIndex(rootNode.Elements(), type);
+                if (rootNode != null)
+                {
+                    //the result will either be a single doc with an id as the root, or it will
+                    // be multiple docs with a <nodes> wrapper, we need to check for this
+                    if (rootNode.HasAttributes)
+                    {
+                        AddNodesToIndex(new[] {rootNode}, type);
+                    }
+                    else
+                    {
+                        AddNodesToIndex(rootNode.Elements(), type);
+                    }
+                }
             }
 
         }
-
-        
-
-        #endregion
     }
 }

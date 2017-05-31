@@ -1,23 +1,29 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Web.Http;
+using System.Web.SessionState;
 using AutoMapper;
 using Umbraco.Web.Models.ContentEditing;
 using Umbraco.Web.Mvc;
 using umbraco;
+using Umbraco.Core;
 
 namespace Umbraco.Web.Editors
 {
     /// <summary>
     /// API controller to deal with Macro data
     /// </summary>
+    /// <remarks>
+    /// Note that this implements IRequiresSessionState which will enable HttpContext.Session - generally speaking we don't normally
+    /// enable this for webapi controllers, however since this controller is used to render macro content and macros can access
+    /// Session, we don't want it to throw null reference exceptions.
+    /// </remarks>
     [PluginController("UmbracoApi")]
-    public class MacroController : UmbracoAuthorizedJsonController
+    public class MacroController : UmbracoAuthorizedJsonController, IRequiresSessionState
     {
-        
-
         /// <summary>
         /// Gets the macro parameters to be filled in for a particular macro
         /// </summary>
@@ -34,7 +40,7 @@ namespace Umbraco.Web.Editors
                 throw new HttpResponseException(HttpStatusCode.NotFound);
             }
 
-            return Mapper.Map<IEnumerable<MacroParameter>>(macro);
+            return Mapper.Map<IEnumerable<MacroParameter>>(macro).OrderBy(x => x.SortOrder);
         }
 
         /// <summary>
@@ -49,7 +55,33 @@ namespace Umbraco.Web.Editors
         /// 
         /// </param>
         /// <returns></returns>
-        public HttpResponseMessage GetMacroResultAsHtmlForEditor(string macroAlias, int pageId, [FromUri]IDictionary<string, object> macroParams)
+        [HttpGet]
+        public HttpResponseMessage GetMacroResultAsHtmlForEditor(string macroAlias, int pageId, [FromUri] IDictionary<string, object> macroParams)
+        {
+            return GetMacroResultAsHtml(macroAlias, pageId, macroParams);
+        }
+
+        /// <summary>
+        /// Gets a rendered macro as html for rendering in the rich text editor.
+        /// Using HTTP POST instead of GET allows for more parameters to be passed as it's not dependant on URL-length limitations like GET.
+        /// The method using GET is kept to maintain backwards compatibility
+        /// </summary>
+        /// <param name="model"></param>
+        /// <returns></returns>
+        [HttpPost]
+        public HttpResponseMessage GetMacroResultAsHtmlForEditor(MacroParameterModel model)
+        {
+            return GetMacroResultAsHtml(model.MacroAlias, model.PageId, model.MacroParams);
+        }
+
+        public class MacroParameterModel
+        {
+            public string MacroAlias { get; set; }
+            public int PageId { get; set; }
+            public IDictionary<string, object> MacroParams { get; set; }
+        }
+
+        private HttpResponseMessage GetMacroResultAsHtml(string macroAlias, int pageId, IDictionary<string, object> macroParams)
         {
             // note - here we should be using the cache, provided that the preview content is in the cache...
 
@@ -81,20 +113,22 @@ namespace Umbraco.Web.Editors
             //the 'easiest' way might be to create an IPublishedContent manually and populate the legacy 'page' object with that
             //and then set the legacy parameters.
 
-            var legacyPage = new global::umbraco.page(doc);                    
+            var legacyPage = new global::umbraco.page(doc);
             UmbracoContext.HttpContext.Items["pageID"] = doc.Id;
             UmbracoContext.HttpContext.Items["pageElements"] = legacyPage.Elements;
             UmbracoContext.HttpContext.Items[global::Umbraco.Core.Constants.Conventions.Url.AltTemplate] = null;
+
+            var renderer = new UmbracoComponentRenderer(UmbracoContext);
 
             var result = Request.CreateResponse();
             //need to create a specific content result formatted as html since this controller has been configured
             //with only json formatters.
             result.Content = new StringContent(
-                Umbraco.RenderMacro(macro, macroParams, legacyPage).ToString(),
+                renderer.RenderMacro(macro, macroParams, legacyPage).ToString(),
                 Encoding.UTF8,
                 "text/html");
             return result;
         }
-
+        
     }
 }

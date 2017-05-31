@@ -21,6 +21,11 @@ namespace Umbraco.Tests.Persistence
 
         #region Overrides of BaseTableByTableTest
 
+        protected override ISqlSyntaxProvider SqlSyntaxProvider
+        {
+            get { return new SqlCeSyntaxProvider(); }
+        }
+
         [SetUp]
         public override void Initialize()
         {
@@ -35,13 +40,13 @@ namespace Umbraco.Tests.Persistence
             }
 
             //Create the Sql CE database
-            var engine = new SqlCeEngine("Datasource=|DataDirectory|test.sdf;Flush Interval=1;");
-            engine.CreateDatabase();
+            using (var engine = new SqlCeEngine("Datasource=|DataDirectory|test.sdf;Flush Interval=1;"))
+            {
+                engine.CreateDatabase();
+            }
             
-            SqlSyntaxContext.SqlSyntaxProvider = SqlCeSyntax.Provider;
-
             _database = new Database("Datasource=|DataDirectory|test.sdf;Flush Interval=1;",
-                                     "System.Data.SqlServerCe.4.0");
+                                     Constants.DatabaseProviders.SqlCe);
         }
 
         [TearDown]

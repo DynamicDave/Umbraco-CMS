@@ -1,13 +1,19 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Moq;
 using NUnit.Framework;
 using Umbraco.Core;
+using Umbraco.Core.Configuration.UmbracoSettings;
+using Umbraco.Core.IO;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Models;
 using Umbraco.Core.Models.Rdbms;
 using Umbraco.Core.Persistence;
-using Umbraco.Core.Persistence.Caching;
+
 using Umbraco.Core.Persistence.Mappers;
 using Umbraco.Core.Persistence.Querying;
 using Umbraco.Core.Persistence.Repositories;
@@ -30,27 +36,282 @@ namespace Umbraco.Tests.Persistence.Repositories
             base.Initialize();
 
             CreateTestData();
+
+            VersionableRepositoryBase<int, IContent>.ThrowOnWarning = true;
         }
 
         [TearDown]
         public override void TearDown()
         {
+            VersionableRepositoryBase<int, IContent>.ThrowOnWarning = false;
+
             base.TearDown();
+        }
+
+        private ContentRepository CreateRepository(IDatabaseUnitOfWork unitOfWork, out ContentTypeRepository contentTypeRepository, out DataTypeDefinitionRepository dtdRepository)
+        {
+            TemplateRepository tr;
+            var ctRepository = CreateRepository(unitOfWork, out contentTypeRepository, out tr);
+            dtdRepository = new DataTypeDefinitionRepository(unitOfWork, CacheHelper, Logger, SqlSyntax, contentTypeRepository);
+            return ctRepository;
         }
 
         private ContentRepository CreateRepository(IDatabaseUnitOfWork unitOfWork, out ContentTypeRepository contentTypeRepository)
         {
-            var templateRepository = new TemplateRepository(unitOfWork, NullCacheProvider.Current);
-            var tagRepository = new TagRepository(unitOfWork, NullCacheProvider.Current);
-            contentTypeRepository = new ContentTypeRepository(unitOfWork, NullCacheProvider.Current, templateRepository);            
-            var repository = new ContentRepository(unitOfWork, NullCacheProvider.Current, contentTypeRepository, templateRepository, tagRepository, CacheHelper.CreateDisabledCacheHelper());
+            TemplateRepository tr;
+            return CreateRepository(unitOfWork, out contentTypeRepository, out tr);
+        }
+
+        private ContentRepository CreateRepository(IDatabaseUnitOfWork unitOfWork, out ContentTypeRepository contentTypeRepository, out TemplateRepository templateRepository)
+        {
+            templateRepository = new TemplateRepository(unitOfWork, CacheHelper, Logger, SqlSyntax, Mock.Of<IFileSystem>(), Mock.Of<IFileSystem>(), Mock.Of<ITemplatesSection>());
+            var tagRepository = new TagRepository(unitOfWork, CacheHelper, Logger, SqlSyntax);
+            contentTypeRepository = new ContentTypeRepository(unitOfWork, CacheHelper, Logger, SqlSyntax, templateRepository);
+            var repository = new ContentRepository(unitOfWork, CacheHelper, Logger, SqlSyntax, contentTypeRepository, templateRepository, tagRepository, Mock.Of<IContentSection>());
             return repository;
+        }
+
+        [Test]
+        public void Get_Always_Returns_Latest_Version()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            IContent content1;
+
+            var versions = new List<Guid>();
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var hasPropertiesContentType = MockedContentTypes.CreateSimpleContentType("umbTextpage1", "Textpage");
+                content1 = MockedContent.CreateSimpleContent(hasPropertiesContentType);
+
+                //save version
+                contentTypeRepository.AddOrUpdate(hasPropertiesContentType);
+                repository.AddOrUpdate(content1);
+                unitOfWork.Commit();
+                versions.Add(content1.Version);
+
+                //publish version
+                content1.ChangePublishedState(PublishedState.Published);
+                repository.AddOrUpdate(content1);
+                unitOfWork.Commit();
+                versions.Add(content1.Version);
+
+                //change something and make a pending version
+                content1.Name = "new name";
+                content1.ChangePublishedState(PublishedState.Saved);
+                repository.AddOrUpdate(content1);
+                unitOfWork.Commit();
+                versions.Add(content1.Version);
+            }
+
+            // Assert
+            Assert.AreEqual(3, versions.Distinct().Count());
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var content = repository.GetByQuery(new Query<IContent>().Where(c => c.Id == content1.Id)).ToArray()[0];
+                Assert.AreEqual(versions[2], content.Version);
+
+                content = repository.Get(content1.Id);
+                Assert.AreEqual(versions[2], content.Version);
+
+                foreach (var version in versions)
+                {
+                    content = repository.GetByVersion(version);
+                    Assert.IsNotNull(content);
+                    Assert.AreEqual(version, content.Version);
+                }
+            }
+        }
+
+        [Test]
+        public void Deal_With_Corrupt_Duplicate_Newest_Published_Flags()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            IContent content1;
+
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var hasPropertiesContentType = MockedContentTypes.CreateSimpleContentType("umbTextpage1", "Textpage");
+                content1 = MockedContent.CreateSimpleContent(hasPropertiesContentType);
+                
+                contentTypeRepository.AddOrUpdate(hasPropertiesContentType);
+                repository.AddOrUpdate(content1);                
+                unitOfWork.Commit();                
+            }
+
+            var versionDtos = new List<ContentVersionDto>();
+
+            //Now manually corrupt the data
+            var versions = new[] { Guid.NewGuid(), Guid.NewGuid() };
+            for (var index = 0; index < versions.Length; index++)
+            {
+                var version = versions[index];
+                var versionDate = DateTime.Now.AddMinutes(index);
+                var versionDto = new ContentVersionDto
+                {
+                    NodeId = content1.Id,
+                    VersionDate = versionDate,
+                    VersionId = version
+                };
+                this.DatabaseContext.Database.Insert(versionDto);
+                versionDtos.Add(versionDto);
+                this.DatabaseContext.Database.Insert(new DocumentDto
+                {
+                    Newest = true,
+                    NodeId = content1.Id,
+                    Published = true,
+                    Text = content1.Name,
+                    VersionId = version,
+                    WriterUserId = 0,
+                    UpdateDate = versionDate,
+                    TemplateId = content1.Template == null || content1.Template.Id <= 0 ? null : (int?) content1.Template.Id
+                });
+            }
+
+            // Assert
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var content = repository.GetByQuery(new Query<IContent>().Where(c => c.Id == content1.Id)).ToArray();
+                Assert.AreEqual(1, content.Length);
+                Assert.AreEqual(content[0].Version, versionDtos.Single(x => x.Id == versionDtos.Max(y => y.Id)).VersionId);
+                Assert.AreEqual(content[0].UpdateDate.ToString(CultureInfo.InvariantCulture), versionDtos.Single(x => x.Id == versionDtos.Max(y => y.Id)).VersionDate.ToString(CultureInfo.InvariantCulture));
+
+                var contentItem = repository.GetByVersion(content1.Version);
+                Assert.IsNotNull(contentItem);
+
+                contentItem = repository.Get(content1.Id);
+                Assert.IsNotNull(contentItem);
+                Assert.AreEqual(contentItem.UpdateDate.ToString(CultureInfo.InvariantCulture), versionDtos.Single(x => x.Id == versionDtos.Max(y => y.Id)).VersionDate.ToString(CultureInfo.InvariantCulture));
+                Assert.AreEqual(contentItem.Version, versionDtos.Single(x => x.Id == versionDtos.Max(y => y.Id)).VersionId);
+
+                var allVersions = repository.GetAllVersions(content[0].Id);
+                var allKnownVersions = versionDtos.Select(x => x.VersionId).Union(new[]{ content1.Version }).ToArray();
+                Assert.IsTrue(allKnownVersions.ContainsAll(allVersions.Select(x => x.Version)));
+                Assert.IsTrue(allVersions.Select(x => x.Version).ContainsAll(allKnownVersions));
+            }
+        }
+
+        /// <summary>
+        /// This tests the regression issue of U4-9438
+        /// </summary>
+        /// <remarks>
+        /// The problem was the iteration of the property data in VersionableRepositoryBase when a content item
+        /// in the list actually doesn't have any property types, it would still skip over a property row.
+        /// To test, we have 3 content items, the first has properties, the second doesn't and the third does.
+        /// </remarks>
+        [Test]
+        public void Property_Data_Assigned_Correctly()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+
+            var allContent = new List<IContent>();
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var emptyContentType = MockedContentTypes.CreateBasicContentType();
+                var hasPropertiesContentType = MockedContentTypes.CreateSimpleContentType("umbTextpage1", "Textpage");
+                var content1 = MockedContent.CreateSimpleContent(hasPropertiesContentType);
+                var content2 = MockedContent.CreateBasicContent(emptyContentType);
+                var content3 = MockedContent.CreateSimpleContent(hasPropertiesContentType);
+
+                // Act
+                contentTypeRepository.AddOrUpdate(emptyContentType);
+                contentTypeRepository.AddOrUpdate(hasPropertiesContentType);
+                repository.AddOrUpdate(content1);
+                repository.AddOrUpdate(content2);
+                repository.AddOrUpdate(content3);
+                unitOfWork.Commit();
+
+                allContent.Add(content1);
+                allContent.Add(content2);
+                allContent.Add(content3);
+            }
+
+            // Assert
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                //this will cause the GetPropertyCollection to execute and we need to ensure that 
+                // all of the properties and property types are all correct
+                var result = repository.GetAll(allContent.Select(x => x.Id).ToArray()).ToArray();
+
+                foreach (var content in result)
+                {
+                    foreach (var contentProperty in content.Properties)
+                    {
+                        //prior to the fix, the 2nd document iteration in the GetPropertyCollection would have caused
+                        //the enumerator to move forward past the first property of the 3rd document which would have 
+                        //ended up not assiging a property to the 3rd document. This would have ended up with the 3rd
+                        //document still having 3 properties but the last one would not have been assigned an identity
+                        //because the property data would not have been assigned.
+                        Assert.IsTrue(contentProperty.HasIdentity);
+                    }
+                }
+            }
+        }
+
+        [Test]
+        public void Rebuild_Xml_Structures_With_Non_Latest_Version()
+        {
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                var contentType1 = MockedContentTypes.CreateSimpleContentType("Textpage1", "Textpage1");
+                contentTypeRepository.AddOrUpdate(contentType1);
+
+                var allCreated = new List<IContent>();
+
+                //create 100 non published
+                for (var i = 0; i < 100; i++)
+                {
+                    var c1 = MockedContent.CreateSimpleContent(contentType1);
+                    repository.AddOrUpdate(c1);
+                    allCreated.Add(c1);
+                }
+                //create 100 published
+                for (var i = 0; i < 100; i++)
+                {
+                    var c1 = MockedContent.CreateSimpleContent(contentType1);
+                    c1.ChangePublishedState(PublishedState.Published);
+                    repository.AddOrUpdate(c1);
+                    allCreated.Add(c1);
+                }
+                unitOfWork.Commit();
+
+                //now create some versions of this content - this shouldn't affect the xml structures saved
+                for (int i = 0; i < allCreated.Count; i++)
+                {
+                    allCreated[i].Name = "blah" + i;
+                    //IMPORTANT testing note here: We need to changed the published state here so that
+                    // it doesn't automatically think this is simply publishing again - this forces the latest
+                    // version to be Saved and not published
+                    allCreated[i].ChangePublishedState(PublishedState.Saved);
+                    repository.AddOrUpdate(allCreated[i]);
+                }
+                unitOfWork.Commit();
+
+                //delete all xml
+                unitOfWork.Database.Execute("DELETE FROM cmsContentXml");
+                Assert.AreEqual(0, unitOfWork.Database.ExecuteScalar<int>("SELECT COUNT(*) FROM cmsContentXml"));
+
+                repository.RebuildXmlStructures(media => new XElement("test"), 10);
+
+                Assert.AreEqual(100, unitOfWork.Database.ExecuteScalar<int>("SELECT COUNT(*) FROM cmsContentXml"));
+            }
         }
 
         [Test]
         public void Rebuild_All_Xml_Structures()
         {
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -84,7 +345,7 @@ namespace Umbraco.Tests.Persistence.Repositories
                 }
                 unitOfWork.Commit();
 
-                //delete all xml                 
+                //delete all xml
                 unitOfWork.Database.Execute("DELETE FROM cmsContentXml");
                 Assert.AreEqual(0, unitOfWork.Database.ExecuteScalar<int>("SELECT COUNT(*) FROM cmsContentXml"));
 
@@ -95,9 +356,65 @@ namespace Umbraco.Tests.Persistence.Repositories
         }
 
         [Test]
+        public void Rebuild_All_Xml_Structures_Ensure_Orphaned_Are_Removed()
+        {
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                //delete all xml
+                unitOfWork.Database.Execute("DELETE FROM cmsContentXml");
+
+                var contentType1 = MockedContentTypes.CreateSimpleContentType("Textpage1", "Textpage1");
+                contentTypeRepository.AddOrUpdate(contentType1);
+                var allCreated = new List<IContent>();
+
+                for (var i = 0; i < 100; i++)
+                {
+                    //These will be non-published so shouldn't show up
+                    var c1 = MockedContent.CreateSimpleContent(contentType1);
+                    repository.AddOrUpdate(c1);
+                    allCreated.Add(c1);
+                }
+                for (var i = 0; i < 100; i++)
+                {
+                    var c1 = MockedContent.CreateSimpleContent(contentType1);
+                    c1.ChangePublishedState(PublishedState.Published);
+                    repository.AddOrUpdate(c1);
+                    allCreated.Add(c1);
+                }
+                unitOfWork.Commit();
+
+                //now create some versions of this content - this shouldn't affect the xml structures saved
+                for (int i = 0; i < allCreated.Count; i++)
+                {
+                    allCreated[i].Name = "blah" + i;
+                    repository.AddOrUpdate(allCreated[i]);
+                }
+                unitOfWork.Commit();
+
+                //Add some extra orphaned rows that shouldn't be there
+                var notPublished = MockedContent.CreateSimpleContent(contentType1);
+                repository.AddOrUpdate(notPublished);
+                unitOfWork.Commit();
+                //Force add it
+                unitOfWork.Database.Insert(new ContentXmlDto
+                {
+                    NodeId = notPublished.Id,
+                    Xml = "<test></test>"
+                });
+
+                repository.RebuildXmlStructures(media => new XElement("test"), 10);
+
+                Assert.AreEqual(100, unitOfWork.Database.ExecuteScalar<int>("SELECT COUNT(*) FROM cmsContentXml"));
+            }
+        }
+
+        [Test]
         public void Rebuild_All_Xml_Structures_For_Content_Type()
         {
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -114,7 +431,7 @@ namespace Umbraco.Tests.Persistence.Repositories
                 for (var i = 0; i < 30; i++)
                 {
                     //These will be non-published so shouldn't show up
-                    var c1 = MockedContent.CreateSimpleContent(contentType1);                 
+                    var c1 = MockedContent.CreateSimpleContent(contentType1);
                     repository.AddOrUpdate(c1);
                     allCreated.Add(c1);
                 }
@@ -149,7 +466,7 @@ namespace Umbraco.Tests.Persistence.Repositories
                 }
                 unitOfWork.Commit();
 
-                //delete all xml                 
+                //delete all xml
                 unitOfWork.Database.Execute("DELETE FROM cmsContentXml");
                 Assert.AreEqual(0, unitOfWork.Database.ExecuteScalar<int>("SELECT COUNT(*) FROM cmsContentXml"));
 
@@ -159,11 +476,72 @@ namespace Umbraco.Tests.Persistence.Repositories
             }
         }
 
+        /// <summary>
+        /// This test ensures that when property values using special database fields are saved, the actual data in the
+        /// object being stored is also transformed in the same way as the data being stored in the database is.
+        /// Before you would see that ex: a decimal value being saved as 100 or "100", would be that exact value in the
+        /// object, but the value saved to the database was actually 100.000000.
+        /// When querying the database for the value again - the value would then differ from what is in the object.
+        /// This caused inconsistencies between saving+publishing and simply saving and then publishing, due to the former
+        /// sending the non-transformed data directly on to publishing.
+        /// </summary>
+        [Test]
+        public void Property_Values_With_Special_DatabaseTypes_Are_Equal_Before_And_After_Being_Persisted()
+        {
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            DataTypeDefinitionRepository dataTypeDefinitionRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository, out dataTypeDefinitionRepository))
+            {
+                // Setup
+                var dtd = new DataTypeDefinition(-1, Constants.PropertyEditors.DecimalAlias) { Name = "test", DatabaseType = DataTypeDatabaseType.Decimal };
+                dataTypeDefinitionRepository.AddOrUpdate(dtd);
+                unitOfWork.Commit();
+
+                const string decimalPropertyAlias = "decimalProperty";
+                const string intPropertyAlias = "intProperty";
+                const string dateTimePropertyAlias = "datetimeProperty";
+                var dateValue = new DateTime(2016, 1, 6);
+
+                var propertyTypeCollection = new PropertyTypeCollection(
+                    new List<PropertyType>
+                    {
+                        MockedPropertyTypes.CreateDecimalProperty(decimalPropertyAlias, "Decimal property", dtd.Id),
+                        MockedPropertyTypes.CreateIntegerProperty(intPropertyAlias, "Integer property"),
+                        MockedPropertyTypes.CreateDateTimeProperty(dateTimePropertyAlias, "DateTime property")
+                    });
+                var contentType = MockedContentTypes.CreateSimpleContentType("umbTextpage1", "Textpage", propertyTypeCollection);
+                contentTypeRepository.AddOrUpdate(contentType);
+                unitOfWork.Commit();
+
+                // Int and decimal values are passed in as strings as they would be from the backoffice UI
+                var textpage = MockedContent.CreateSimpleContentWithSpecialDatabaseTypes(contentType, "test@umbraco.org", -1, "100", "150", dateValue);
+
+                // Act
+                repository.AddOrUpdate(textpage);
+                unitOfWork.Commit();
+
+                // Assert
+                Assert.That(contentType.HasIdentity, Is.True);
+                Assert.That(textpage.HasIdentity, Is.True);
+
+                var persistedTextpage = repository.Get(textpage.Id);
+                Assert.That(persistedTextpage.Name, Is.EqualTo(textpage.Name));
+                Assert.AreEqual(100m, persistedTextpage.GetValue(decimalPropertyAlias));
+                Assert.AreEqual(persistedTextpage.GetValue(decimalPropertyAlias), textpage.GetValue(decimalPropertyAlias));
+                Assert.AreEqual(150, persistedTextpage.GetValue(intPropertyAlias));
+                Assert.AreEqual(persistedTextpage.GetValue(intPropertyAlias), textpage.GetValue(intPropertyAlias));
+                Assert.AreEqual(dateValue, persistedTextpage.GetValue(dateTimePropertyAlias));
+                Assert.AreEqual(persistedTextpage.GetValue(dateTimePropertyAlias), textpage.GetValue(dateTimePropertyAlias));
+            }
+        }
+
         [Test]
         public void Ensures_Permissions_Are_Set_If_Parent_Entity_Permissions_Exist()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
 
             ContentTypeRepository contentTypeRepository;
@@ -194,30 +572,16 @@ namespace Umbraco.Tests.Persistence.Repositories
         }
 
         [Test]
-        public void Can_Instantiate_Repository_From_Resolver()
-        {
-            // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
-            var unitOfWork = provider.GetUnitOfWork();
-
-            // Act
-            var repository = RepositoryResolver.Current.ResolveByType<IContentRepository>(unitOfWork);
-
-            // Assert
-            Assert.That(repository, Is.Not.Null);
-        }
-
-        [Test]
         public void Can_Perform_Add_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 ContentType contentType = MockedContentTypes.CreateSimpleContentType("umbTextpage2", "Textpage");
-                Content textpage = MockedContent.CreateSimpleContent(contentType);
+                IContent textpage = MockedContent.CreateSimpleContent(contentType);
 
                 // Act
                 contentTypeRepository.AddOrUpdate(contentType);
@@ -227,6 +591,43 @@ namespace Umbraco.Tests.Persistence.Repositories
                 // Assert
                 Assert.That(contentType.HasIdentity, Is.True);
                 Assert.That(textpage.HasIdentity, Is.True);
+
+
+            }
+        }
+
+        [Test]
+        public void Can_Perform_Add_With_Default_Template()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            TemplateRepository templateRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository, out templateRepository))
+            {
+                var template = new Template("hello", "hello");
+                templateRepository.AddOrUpdate(template);
+                unitOfWork.Commit();
+
+                ContentType contentType = MockedContentTypes.CreateSimpleContentType("umbTextpage2", "Textpage");
+                contentType.AllowedTemplates = Enumerable.Empty<ITemplate>(); // because CreateSimple... assigns one
+                contentType.SetDefaultTemplate(template);
+                Content textpage = MockedContent.CreateSimpleContent(contentType);
+
+                // Act
+
+                contentTypeRepository.AddOrUpdate(contentType);
+                repository.AddOrUpdate(textpage);
+                unitOfWork.Commit();
+
+                var fetched = repository.Get(textpage.Id);
+
+                // Assert
+                Assert.That(textpage.Template, Is.Not.Null);
+                Assert.That(textpage.Template, Is.EqualTo(contentType.DefaultTemplate));
+
+                TestHelper.AssertAllPropertyValuesAreEquals(textpage, fetched, "yyyy-MM-dd HH:mm:ss");
             }
         }
 
@@ -235,7 +636,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Save_Content_With_AtSign_In_Name_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -269,7 +670,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Multiple_Adds_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -295,41 +696,12 @@ namespace Umbraco.Tests.Persistence.Repositories
 
         }
 
-        [Test]
-        public void Can_Perform_Multiple_Adds_On_ContentRepository_With_RepositoryResolver()
-        {
-            // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
-            var unitOfWork = provider.GetUnitOfWork();
-            ContentTypeRepository contentTypeRepository;
-            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
-            {
-                ContentType contentType = MockedContentTypes.CreateSimpleContentType("umbTextpage1", "Textpage");
-                Content textpage = MockedContent.CreateSimpleContent(contentType);
-
-                // Act
-                contentTypeRepository.AddOrUpdate(contentType);
-                repository.AddOrUpdate(textpage);
-                unitOfWork.Commit();
-
-                var repository2 = RepositoryResolver.Current.ResolveByType<IContentRepository>(unitOfWork);
-                Content subpage = MockedContent.CreateSimpleContent(contentType, "Text Page 1", textpage.Id);
-                repository2.AddOrUpdate(subpage);
-                unitOfWork.Commit();
-
-                // Assert
-                Assert.That(contentType.HasIdentity, Is.True);
-                Assert.That(textpage.HasIdentity, Is.True);
-                Assert.That(subpage.HasIdentity, Is.True);
-                Assert.That(textpage.Id, Is.EqualTo(subpage.ParentId));
-            }
-        }
 
         [Test]
         public void Can_Verify_Fresh_Entity_Is_Not_Dirty()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -347,7 +719,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Update_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -367,10 +739,32 @@ namespace Umbraco.Tests.Persistence.Repositories
         }
 
         [Test]
+        public void Can_Update_With_Null_Template()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                // Act
+                var content = repository.Get(NodeDto.NodeIdSeed + 2);
+                content.Template = null;
+                repository.AddOrUpdate(content);
+                unitOfWork.Commit();
+                var updatedContent = repository.Get(NodeDto.NodeIdSeed + 2);
+
+                // Assert
+                Assert.That(updatedContent.Template, Is.Null);
+            }
+
+        }
+
+        [Test]
         public void Can_Perform_Delete_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -385,11 +779,10 @@ namespace Umbraco.Tests.Persistence.Repositories
                 unitOfWork.Commit();
                 var id = content.Id;
 
-                var repository2 = RepositoryResolver.Current.ResolveByType<IContentRepository>(unitOfWork);
-                repository2.Delete(content);
+                repository.Delete(content);
                 unitOfWork.Commit();
 
-                var content1 = repository2.Get(id);
+                var content1 = repository.Get(id);
 
                 // Assert
                 Assert.That(content1, Is.Null);
@@ -400,7 +793,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Get_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -414,7 +807,7 @@ namespace Umbraco.Tests.Persistence.Repositories
                 Assert.That(content.UpdateDate, Is.GreaterThan(DateTime.MinValue));
                 Assert.That(content.ParentId, Is.Not.EqualTo(0));
                 Assert.That(content.Name, Is.EqualTo("Text Page 2"));
-                Assert.That(content.SortOrder, Is.EqualTo(1));
+                //Assert.That(content.SortOrder, Is.EqualTo(1));
                 Assert.That(content.Version, Is.Not.EqualTo(Guid.Empty));
                 Assert.That(content.ContentTypeId, Is.EqualTo(NodeDto.NodeIdSeed));
                 Assert.That(content.Path, Is.Not.Empty);
@@ -426,7 +819,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetByQuery_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -444,11 +837,11 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Get_All_With_Many_Version()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
-            {                
+            {
                 var result = repository.GetAll().ToArray();
                 foreach (var content in result)
                 {
@@ -472,23 +865,69 @@ namespace Umbraco.Tests.Persistence.Repositories
         }
 
         [Test]
+        public void Can_Perform_GetPagedResultsByQuery_Sorting_On_Custom_Property()
+        {
+            // Arrange
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
+            var unitOfWork = provider.GetUnitOfWork();
+            ContentTypeRepository contentTypeRepository;
+            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
+            {
+                // Act
+                var query = Query<IContent>.Builder.Where(x => x.Name.Contains("Text"));
+                long totalRecords;
+
+                try
+                {
+                    DatabaseContext.Database.EnableSqlTrace = true;
+                    DatabaseContext.Database.EnableSqlCount();
+
+                    var result = repository.GetPagedResultsByQuery(query, 0, 2, out totalRecords, "title", Direction.Ascending, false);
+
+                    Assert.AreEqual(3, totalRecords);
+                    Assert.AreEqual(2, result.Count());
+
+                    result = repository.GetPagedResultsByQuery(query, 1, 2, out totalRecords, "title", Direction.Ascending, false);
+
+                    Assert.AreEqual(1, result.Count());
+                }
+                finally
+                {
+                    DatabaseContext.Database.EnableSqlTrace = false;
+                    DatabaseContext.Database.DisableSqlCount();
+                }
+            }
+        }
+
+        [Test]
         public void Can_Perform_GetPagedResultsByQuery_ForFirstPage_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending);
+                long totalRecords;
 
-                // Assert
-                Assert.That(totalRecords, Is.GreaterThanOrEqualTo(2));
-                Assert.That(result.Count(), Is.EqualTo(1));
-                Assert.That(result.First().Name, Is.EqualTo("Text Page 1"));
+                try
+                {
+                    DatabaseContext.Database.EnableSqlTrace = true;
+                    DatabaseContext.Database.EnableSqlCount();
+                    var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending, true);
+
+                    // Assert
+                    Assert.That(totalRecords, Is.GreaterThanOrEqualTo(2));
+                    Assert.That(result.Count(), Is.EqualTo(1));
+                    Assert.That(result.First().Name, Is.EqualTo("Text Page 1"));
+                }
+                finally
+                {
+                    DatabaseContext.Database.EnableSqlTrace = false;
+                    DatabaseContext.Database.DisableSqlCount();
+                }
             }
         }
 
@@ -496,15 +935,15 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetPagedResultsByQuery_ForSecondPage_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 1, 1, out totalRecords, "Name", Direction.Ascending);
+                long totalRecords;
+                var result = repository.GetPagedResultsByQuery(query, 1, 1, out totalRecords, "Name", Direction.Ascending, true);
 
                 // Assert
                 Assert.That(totalRecords, Is.GreaterThanOrEqualTo(2));
@@ -517,15 +956,15 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetPagedResultsByQuery_WithSinglePage_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 0, 2, out totalRecords, "Name", Direction.Ascending);
+                long totalRecords;
+                var result = repository.GetPagedResultsByQuery(query, 0, 2, out totalRecords, "Name", Direction.Ascending, true);
 
                 // Assert
                 Assert.That(totalRecords, Is.GreaterThanOrEqualTo(2));
@@ -538,15 +977,15 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetPagedResultsByQuery_WithDescendingOrder_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Descending);
+                long totalRecords;
+                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Descending, true);
 
                 // Assert
                 Assert.That(totalRecords, Is.GreaterThanOrEqualTo(2));
@@ -559,15 +998,17 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetPagedResultsByQuery_WithFilterMatchingSome_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending, "Page 2");
+                var filterQuery = Query<IContent>.Builder.Where(x => x.Name.Contains("Page 2"));
+
+                long totalRecords;
+                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending, true, filterQuery);
 
                 // Assert
                 Assert.That(totalRecords, Is.EqualTo(1));
@@ -580,15 +1021,17 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetPagedResultsByQuery_WithFilterMatchingAll_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
             {
                 // Act
                 var query = Query<IContent>.Builder.Where(x => x.Level == 2);
-                int totalRecords;
-                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending, "Page");
+                var filterQuery = Query<IContent>.Builder.Where(x => x.Name.Contains("Page"));
+
+                long totalRecords;
+                var result = repository.GetPagedResultsByQuery(query, 0, 1, out totalRecords, "Name", Direction.Ascending, true, filterQuery);
 
                 // Assert
                 Assert.That(totalRecords, Is.EqualTo(2));
@@ -601,7 +1044,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetAll_By_Param_Ids_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -620,7 +1063,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_GetAll_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -641,7 +1084,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Exists_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -660,7 +1103,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Perform_Count_On_ContentRepository()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -679,7 +1122,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Verify_Keys_Set()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -700,7 +1143,7 @@ namespace Umbraco.Tests.Persistence.Repositories
         public void Can_Get_Content_By_Guid_Key()
         {
             // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             var unitOfWork = provider.GetUnitOfWork();
             ContentTypeRepository contentTypeRepository;
             using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
@@ -714,34 +1157,6 @@ namespace Umbraco.Tests.Persistence.Repositories
                 Assert.That(content.Id, Is.EqualTo(NodeDto.NodeIdSeed + 1));
             }
 
-        }
-
-        [Test]
-        public void Can_Create_Different_Language_Version()
-        {
-            // Arrange
-            var provider = new PetaPocoUnitOfWorkProvider();
-            var unitOfWork = provider.GetUnitOfWork();
-            ContentTypeRepository contentTypeRepository;
-            using (var repository = CreateRepository(unitOfWork, out contentTypeRepository))
-            {
-                var content = repository.Get(NodeDto.NodeIdSeed + 2);
-
-                // Act
-                content.Language = "da-DK";
-                content.Name = "Tekst Side 1";
-                repository.AddOrUpdate(content);
-                unitOfWork.Commit();
-
-                var latest = repository.Get(NodeDto.NodeIdSeed + 2);
-                var english = repository.GetByLanguage(NodeDto.NodeIdSeed + 2, "en-US");
-                var danish = repository.GetByLanguage(NodeDto.NodeIdSeed + 2, "da-DK");
-
-                // Assert
-                Assert.That(latest.Name, Is.EqualTo("Tekst Side 1"));
-                Assert.That(english.Name, Is.EqualTo("Text Page 1"));
-                Assert.That(danish.Name, Is.EqualTo("Tekst Side 1"));
-            }
         }
 
         public void CreateTestData()

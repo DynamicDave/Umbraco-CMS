@@ -4,6 +4,7 @@ using System.Web.Mvc;
 using System.Web.Routing;
 using System.Web.UI;
 using Umbraco.Core;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Services;
 using Umbraco.Web.Security;
 using umbraco.DataLayer;
@@ -65,6 +66,22 @@ namespace Umbraco.Web.UI.Controls
         }
 
         /// <summary>
+        /// Returns an ILogger
+        /// </summary>
+        public ILogger Logger
+        {
+            get { return ProfilingLogger.Logger; }
+        }
+
+        /// <summary>
+        /// Returns a ProfilingLogger
+        /// </summary>
+        public ProfilingLogger ProfilingLogger
+        {
+            get { return UmbracoContext.Application.ProfilingLogger; }
+        }
+
+        /// <summary>
         /// Returns the current UmbracoContext
         /// </summary>
         public UmbracoContext UmbracoContext { get; private set; }
@@ -106,8 +123,9 @@ namespace Umbraco.Web.UI.Controls
         }
 
         /// <summary>
-        /// Returns the legacy SqlHelper
+        /// Unused, please do not use
         /// </summary>
+        [Obsolete("Obsolete, For querying the database use the new UmbracoDatabase object ApplicationContext.Current.DatabaseContext.Database", false)]
         protected ISqlHelper SqlHelper
         {
             get { return global::umbraco.BusinessLogic.Application.SqlHelper; }

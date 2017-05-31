@@ -398,6 +398,10 @@ namespace Umbraco.Tests.Services
 
             var user1 = ServiceContext.UserService.CreateUserWithIdentity("test1", "test1@test.com", userType);
 
+            var result1 = ServiceContext.UserService.GetUserById((int)user1.Id);
+            //expect 2 sections by default
+            Assert.AreEqual(2, result1.AllowedSections.Count());
+
             //adds some allowed sections
             user1.AddAllowedSection("test1");
             user1.AddAllowedSection("test2");
@@ -405,8 +409,9 @@ namespace Umbraco.Tests.Services
             user1.AddAllowedSection("test4");
             ServiceContext.UserService.Save(user1);
 
-            var result1 = ServiceContext.UserService.GetUserById((int)user1.Id);
-            Assert.AreEqual(4, result1.AllowedSections.Count());
+            result1 = ServiceContext.UserService.GetUserById((int)user1.Id);
+            //expect 6 sections including the two default sections
+            Assert.AreEqual(6, result1.AllowedSections.Count());
 
             //simulate clearing the sections
             foreach (var s in user1.AllowedSections)
@@ -419,11 +424,9 @@ namespace Umbraco.Tests.Services
             ServiceContext.UserService.Save(result1);
 
             //assert
-
             //re-get
             result1 = ServiceContext.UserService.GetUserById((int)user1.Id);
             Assert.AreEqual(2, result1.AllowedSections.Count());
-
         }
 
         [Test]
@@ -448,7 +451,6 @@ namespace Umbraco.Tests.Services
             var result2 = ServiceContext.UserService.GetUserById((int)user2.Id);
             Assert.IsFalse(result1.AllowedSections.Contains("test"));
             Assert.IsFalse(result2.AllowedSections.Contains("test"));
-
         }
 
         [Test]
@@ -486,6 +488,43 @@ namespace Umbraco.Tests.Services
             Assert.IsTrue(result2.AllowedSections.Contains("test"));
             Assert.IsTrue(result3.AllowedSections.Contains("test"));
             Assert.IsTrue(result4.AllowedSections.Contains("test"));
+        }
+
+        [Test]
+        public void Cannot_Create_User_With_Empty_Username()
+        {
+            // Arrange
+            var userService = ServiceContext.UserService;
+            var userType = userService.GetUserTypeByAlias("admin");
+
+            // Act & Assert
+            Assert.Throws<ArgumentException>(() => userService.CreateUserWithIdentity(string.Empty, "john@umbraco.io", userType));
+        }
+
+        [Test]
+        public void Cannot_Save_User_With_Empty_Username()
+        {
+            // Arrange
+            var userService = ServiceContext.UserService;
+            var userType = userService.GetUserTypeByAlias("admin");
+            var user = userService.CreateUserWithIdentity("John Doe", "john@umbraco.io", userType);
+            user.Username = string.Empty;
+
+            // Act & Assert
+            Assert.Throws<ArgumentException>(() => userService.Save(user));
+        }
+
+        [Test]
+        public void Cannot_Save_User_With_Empty_Name()
+        {
+            // Arrange
+            var userService = ServiceContext.UserService;
+            var userType = userService.GetUserTypeByAlias("admin");
+            var user = userService.CreateUserWithIdentity("John Doe", "john@umbraco.io", userType);
+            user.Name = string.Empty;
+
+            // Act & Assert
+            Assert.Throws<ArgumentException>(() => userService.Save(user));
         }
 
         [Test]
@@ -546,7 +585,7 @@ namespace Umbraco.Tests.Services
             Assert.That(updatedItem.StartMediaId, Is.EqualTo(originalUser.StartMediaId));
             Assert.That(updatedItem.Email, Is.EqualTo(originalUser.Email));
             Assert.That(updatedItem.Username, Is.EqualTo(originalUser.Username));
-            Assert.That(updatedItem.AllowedSections.Count(), Is.EqualTo(0));
+            Assert.That(updatedItem.AllowedSections.Count(), Is.EqualTo(2));
         }
     }
 }

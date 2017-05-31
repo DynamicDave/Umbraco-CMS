@@ -12,9 +12,11 @@ namespace Umbraco.Core.Persistence.Mappers
         /// <summary>
         /// Constructor accepting a list of BaseMapper types that are attributed with the MapperFor attribute
         /// </summary>
+        /// <param name="serviceProvider"></param>
+        /// <param name="logger"></param>
         /// <param name="assignedMapperTypes"></param>
-        public MappingResolver(Func<IEnumerable<Type>> assignedMapperTypes)
-            : base(assignedMapperTypes)
+        public MappingResolver(IServiceProvider serviceProvider, ILogger logger, Func<IEnumerable<Type>> assignedMapperTypes)
+            : base(serviceProvider, logger, assignedMapperTypes)
         {
             
         }
@@ -29,7 +31,7 @@ namespace Umbraco.Core.Persistence.Mappers
         /// </summary>
         /// <param name="type"></param>
         /// <returns></returns>
-        internal BaseMapper ResolveMapperByType(Type type)
+        public virtual BaseMapper ResolveMapperByType(Type type)
         {
             return _mapperCache.GetOrAdd(type, type1 =>
                 {
@@ -41,7 +43,7 @@ namespace Umbraco.Core.Persistence.Mappers
                     {
                         return byAttribute.Result;
                     }
-                    throw new Exception("Invalid Type: A Mapper could not be resolved based on the passed in Type");
+                    throw new Exception("Invalid Type: A Mapper could not be resolved based on the passed in Type " + type);
                 });
         }
 
@@ -65,7 +67,7 @@ namespace Umbraco.Core.Persistence.Mappers
             return Attempt<BaseMapper>.Succeed(mapper);
         }  
 
-        internal string GetMapping(Type type, string propertyName)
+        public virtual string GetMapping(Type type, string propertyName)
         {
             var mapper = ResolveMapperByType(type);
             var result = mapper.Map(propertyName);

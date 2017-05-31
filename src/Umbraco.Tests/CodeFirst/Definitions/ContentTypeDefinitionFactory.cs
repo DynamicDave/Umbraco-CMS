@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using Umbraco.Core;
@@ -210,11 +211,11 @@ namespace Umbraco.Tests.CodeFirst.Definitions
             {
                 var field = fields[sortOrder[i]];
                 list.Add(field.ContentType.Value);
-                Console.WriteLine(field.Alias);
+                Debug.Print(field.Alias);
                 if (field.DependsOn != null)
                     foreach (var item in field.DependsOn)
                     {
-                        Console.WriteLine(" -{0}", item);
+                        Debug.Print(" -{0}", item);
                     }
             }
             list.Reverse();
@@ -324,7 +325,7 @@ namespace Umbraco.Tests.CodeFirst.Definitions
                                ? string.Concat(@alias, ".cshtml")
                                : string.Concat(@alias, ".masterpage");
 
-                    template = new Template(string.Empty, name, @alias) { CreatorId = 0, Content = string.Empty};
+                    template = new Template(string.Empty, name, @alias) { Content = string.Empty};
 					ApplicationContext.Current.Services.FileService.SaveTemplate(template);
                 }
                 templates.Add(template);

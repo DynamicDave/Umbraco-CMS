@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using Umbraco.Core.Models;
 using Umbraco.Core.Models.Rdbms;
+using Umbraco.Core.Persistence.SqlSyntax;
 
 namespace Umbraco.Core.Persistence.Mappers
 {
@@ -15,6 +16,11 @@ namespace Umbraco.Core.Persistence.Mappers
     public sealed class ContentMapper : BaseMapper
     {
         private static readonly ConcurrentDictionary<string, DtoMapModel> PropertyInfoCacheInstance = new ConcurrentDictionary<string, DtoMapModel>();
+
+        public ContentMapper(ISqlSyntaxProvider sqlSyntax) : base(sqlSyntax)
+        {
+            
+        }
 
         //NOTE: its an internal class but the ctor must be public since we're using Activator.CreateInstance to create it
         // otherwise that would fail because there is no public constructor.
@@ -47,7 +53,6 @@ namespace Umbraco.Core.Persistence.Mappers
                 CacheMap<Content, ContentDto>(src => src.ContentTypeId, dto => dto.ContentTypeId);
                 CacheMap<Content, ContentVersionDto>(src => src.UpdateDate, dto => dto.VersionDate);
                 CacheMap<Content, ContentVersionDto>(src => src.Version, dto => dto.VersionId);
-                CacheMap<Content, ContentVersionDto>(src => src.Language, dto => dto.Language);
                 CacheMap<Content, DocumentDto>(src => src.Name, dto => dto.Text);
                 CacheMap<Content, DocumentDto>(src => src.ExpireDate, dto => dto.ExpiresDate);
                 CacheMap<Content, DocumentDto>(src => src.ReleaseDate, dto => dto.ReleaseDate);

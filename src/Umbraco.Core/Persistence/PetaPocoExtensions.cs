@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Data.SqlClient;
+using System.Data.SqlServerCe;
 using System.Linq;
 using System.Text.RegularExpressions;
+using MySql.Data.MySqlClient;
+using StackExchange.Profiling.Data;
 using Umbraco.Core.Logging;
-using Umbraco.Core.Models.Rdbms;
 using Umbraco.Core.Persistence.DatabaseModelDefinitions;
-using Umbraco.Core.Persistence.Migrations.Initial;
 using Umbraco.Core.Persistence.Querying;
 using Umbraco.Core.Persistence.SqlSyntax;
 
@@ -16,29 +17,59 @@ namespace Umbraco.Core.Persistence
 {
     public static class PetaPocoExtensions
     {
-        internal delegate void CreateTableEventHandler(string tableName, Database db, TableCreationEventArgs e);
-
-        internal static event CreateTableEventHandler NewTable;
+        // NOTE
+        //
+        // proper way to do it with TSQL and SQLCE
+        //   IF EXISTS (SELECT ... FROM table WITH (UPDLOCK,HOLDLOCK)) WHERE ...)
+        //   BEGIN
+        //     UPDATE table SET ... WHERE ...
+        //   END
+        //   ELSE
+        //   BEGIN
+        //     INSERT INTO table (...) VALUES (...)
+        //   END
+        //
+        // works in READ COMMITED, TSQL & SQLCE lock the constraint even if it does not exist, so INSERT is OK
+        //
+        // proper way to do it with MySQL
+        //   IF EXISTS (SELECT ... FROM table WHERE ... FOR UPDATE)
+        //   BEGIN
+        //     UPDATE table SET ... WHERE ...
+        //   END
+        //   ELSE
+        //   BEGIN
+        //     INSERT INTO table (...) VALUES (...)
+        //   END
+        //
+        // MySQL locks the constraint ONLY if it exists, so INSERT may fail...
+        //   in theory, happens in READ COMMITTED but not REPEATABLE READ
+        //   http://www.percona.com/blog/2012/08/28/differences-between-read-committed-and-repeatable-read-transaction-isolation-levels/
+        //   but according to
+        //   http://dev.mysql.com/doc/refman/5.0/en/set-transaction.html
+        //   it won't work for exact index value (only ranges) so really...
+        //
+        // MySQL should do
+        //   INSERT INTO table (...) VALUES (...) ON DUPLICATE KEY UPDATE ...
+        //
+        // also the lock is released when the transaction is committed
+        // not sure if that can have unexpected consequences on our code?
+        //
+        // so... for the time being, let's do with that somewhat crazy solution below...
 
         /// <summary>
-        /// This will handle the issue of inserting data into a table when there can be a violation of a primary key or unique constraint which
-        /// can occur when two threads are trying to insert data at the exact same time when the data violates this constraint. 
+        /// Safely inserts a record, or updates if it exists, based on a unique constraint.
         /// </summary>
         /// <param name="db"></param>
-        /// <param name="poco"></param>       
-        /// <returns>
-        /// Returns the action that executed, either an insert or an update
-        /// 
-        /// NOTE: If an insert occurred and a PK value got generated, the poco object passed in will contain the updated value.
-        /// </returns>
+        /// <param name="poco"></param>
+        /// <returns>The action that executed, either an insert or an update. If an insert occurred and a PK value got generated, the poco object
+        /// passed in will contain the updated value.</returns>
         /// <remarks>
-        /// In different databases, there are a few raw SQL options like MySql's ON DUPLICATE KEY UPDATE or MSSQL's MERGE WHEN MATCHED, but since we are 
-        /// also supporting SQLCE for which this doesn't exist we cannot simply rely on the underlying database to help us here. So we'll actually need to 
-        /// try to be as proficient as possible when we know this can occur and manually handle the issue. 
-        /// 
-        /// We do this by first trying to Update the record, this will return the number of rows affected. If it is zero then we insert, if it is one, then
-        /// we know the update was successful and the row was already inserted by another thread. If the rowcount is zero and we insert and get an exception, 
-        /// that's due to a race condition, in which case we need to retry and update.
+        /// <para>We cannot rely on database-specific options such as MySql ON DUPLICATE KEY UPDATE or MSSQL MERGE WHEN MATCHED because SQLCE
+        /// does not support any of them. Ideally this should be achieved with proper transaction isolation levels but that would mean revisiting
+        /// isolation levels globally. We want to keep it simple for the time being and manage it manually.</para>
+        /// <para>We handle it by trying to update, then insert, etc. until something works, or we get bored.</para>
+        /// <para>Note that with proper transactions, if T2 begins after T1 then we are sure that the database will contain T2's value
+        /// once T1 and T2 have completed. Whereas here, it could contain T1's value.</para>
         /// </remarks>
         internal static RecordPersistenceType InsertOrUpdate<T>(this Database db, T poco)
             where T : class
@@ -47,66 +78,69 @@ namespace Umbraco.Core.Persistence
         }
 
         /// <summary>
-        /// This will handle the issue of inserting data into a table when there can be a violation of a primary key or unique constraint which
-        /// can occur when two threads are trying to insert data at the exact same time when the data violates this constraint. 
+        /// Safely inserts a record, or updates if it exists, based on a unique constraint.
         /// </summary>
         /// <param name="db"></param>
         /// <param name="poco"></param>
-        /// <param name="updateArgs"></param>      
+        /// <param name="updateArgs"></param>
         /// <param name="updateCommand">If the entity has a composite key they you need to specify the update command explicitly</param>
-        /// <returns>
-        /// Returns the action that executed, either an insert or an update
-        /// 
-        /// NOTE: If an insert occurred and a PK value got generated, the poco object passed in will contain the updated value.
-        /// </returns>
+        /// <returns>The action that executed, either an insert or an update. If an insert occurred and a PK value got generated, the poco object
+        /// passed in will contain the updated value.</returns>
         /// <remarks>
-        /// In different databases, there are a few raw SQL options like MySql's ON DUPLICATE KEY UPDATE or MSSQL's MERGE WHEN MATCHED, but since we are 
-        /// also supporting SQLCE for which this doesn't exist we cannot simply rely on the underlying database to help us here. So we'll actually need to 
-        /// try to be as proficient as possible when we know this can occur and manually handle the issue. 
-        /// 
-        /// We do this by first trying to Update the record, this will return the number of rows affected. If it is zero then we insert, if it is one, then
-        /// we know the update was successful and the row was already inserted by another thread. If the rowcount is zero and we insert and get an exception, 
-        /// that's due to a race condition, in which case we need to retry and update.
+        /// <para>We cannot rely on database-specific options such as MySql ON DUPLICATE KEY UPDATE or MSSQL MERGE WHEN MATCHED because SQLCE
+        /// does not support any of them. Ideally this should be achieved with proper transaction isolation levels but that would mean revisiting
+        /// isolation levels globally. We want to keep it simple for the time being and manage it manually.</para>
+        /// <para>We handle it by trying to update, then insert, etc. until something works, or we get bored.</para>
+        /// <para>Note that with proper transactions, if T2 begins after T1 then we are sure that the database will contain T2's value
+        /// once T1 and T2 have completed. Whereas here, it could contain T1's value.</para>
         /// </remarks>
         internal static RecordPersistenceType InsertOrUpdate<T>(this Database db,
-            T poco, 
-            string updateCommand, 
+            T poco,
+            string updateCommand,
             object updateArgs)
             where T : class
         {
-            if (poco == null) throw new ArgumentNullException("poco");
+            if (poco == null)
+                throw new ArgumentNullException("poco");
 
+            // try to update
             var rowCount = updateCommand.IsNullOrWhiteSpace()
                     ? db.Update(poco)
-                    : db.Update<T>(updateCommand, updateArgs); 
-
-            if (rowCount > 0) return RecordPersistenceType.Update;
-
-            try
-            {
-                db.Insert(poco);
-                return RecordPersistenceType.Insert;
-            }
-            //TODO: Need to find out if this is the same exception that will occur for all databases... pretty sure it will be
-            catch (SqlException ex)
-            {
-                //This will occur if the constraint was violated and this record was already inserted by another thread, 
-                //at this exact same time, in this case we need to do an update
-
-                rowCount = updateCommand.IsNullOrWhiteSpace() 
-                    ? db.Update(poco) 
-                    : db.Update<T>(updateCommand, updateArgs);                
-
-                if (rowCount == 0)
-                {
-                    //this would be strange! in this case the only circumstance would be that at the exact same time, 3 threads executed, one
-                    // did the insert and the other somehow managed to do a delete precisely before this update was executed... now that would
-                    // be real crazy. In that case we need to throw an exception.
-                    throw new DataException("Record could not be inserted or updated");
-                }
-
+                    : db.Update<T>(updateCommand, updateArgs);
+            if (rowCount > 0)
                 return RecordPersistenceType.Update;
+
+            // failed: does not exist, need to insert
+            // RC1 race cond here: another thread may insert a record with the same constraint
+
+            var i = 0;
+            while (i++ < 4)
+            {
+                try
+                {
+                    // try to insert
+                    db.Insert(poco);
+                    return RecordPersistenceType.Insert;
+                }
+                catch (SqlException) // TODO: need to find out if all db will throw that exception - probably OK
+                {
+                    // failed: exists (due to race cond RC1)
+                    // RC2 race cond here: another thread may remove the record
+
+                    // try to update
+                    rowCount = updateCommand.IsNullOrWhiteSpace()
+                        ? db.Update(poco)
+                        : db.Update<T>(updateCommand, updateArgs);
+                    if (rowCount > 0)
+                        return RecordPersistenceType.Update;
+
+                    // failed: does not exist (due to race cond RC2), need to insert
+                    // loop
+                }
             }
+
+            // this can go on forever... have to break at some point and report an error.
+            throw new DataException("Record could not be inserted or updated.");
         }
 
         /// <summary>
@@ -120,26 +154,35 @@ namespace Umbraco.Core.Persistence
             {
                 //this fancy regex will only match a single @ not a double, etc...
                 var regex = new Regex("(?<!@)@(?!@)");
-                return regex.Replace(value, "@@");    
+                return regex.Replace(value, "@@");
             }
             return value;
 
         }
 
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void CreateTable<T>(this Database db)
-           where T : new()
+          where T : new()
         {
-            var tableType = typeof(T);
-            CreateTable(db, false, tableType);
+            var creator = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            creator.CreateTable<T>();
         }
 
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void CreateTable<T>(this Database db, bool overwrite)
            where T : new()
         {
-            var tableType = typeof(T);
-            CreateTable(db, overwrite, tableType);
+            var creator = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            creator.CreateTable<T>(overwrite);
         }
 
+        /// <summary>
+        /// Performs the bulk insertion in the context of a current transaction with an optional parameter to complete the transaction
+        /// when finished
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="db"></param>
+        /// <param name="collection"></param>
         public static void BulkInsertRecords<T>(this Database db, IEnumerable<T> collection)
         {
             //don't do anything if there are no records.
@@ -148,7 +191,7 @@ namespace Umbraco.Core.Persistence
 
             using (var tr = db.GetTransaction())
             {
-                db.BulkInsertRecords(collection, tr, true);
+                db.BulkInsertRecords(collection, tr, SqlSyntaxContext.SqlSyntaxProvider, true, true); // use native, commit
             }
         }
 
@@ -160,54 +203,98 @@ namespace Umbraco.Core.Persistence
         /// <param name="db"></param>
         /// <param name="collection"></param>
         /// <param name="tr"></param>
+        /// <param name="syntaxProvider"></param>
+        /// <param name="useNativeSqlPlatformBulkInsert">
+        /// If this is false this will try to just generate bulk insert statements instead of using the current SQL platform's bulk
+        /// insert logic. For SQLCE, bulk insert statements do not work so if this is false it will insert one at a time.
+        /// </param>
         /// <param name="commitTrans"></param>
-        public static void BulkInsertRecords<T>(this Database db, IEnumerable<T> collection, Transaction tr, bool commitTrans = false)
+        /// <returns>The number of items inserted</returns>
+        public static int BulkInsertRecords<T>(this Database db,
+            IEnumerable<T> collection,
+            Transaction tr,
+            ISqlSyntaxProvider syntaxProvider,
+            bool useNativeSqlPlatformBulkInsert = true,
+            bool commitTrans = false)
         {
+
             //don't do anything if there are no records.
             if (collection.Any() == false)
-                return;
+            {
+                return 0;
+            }
+
+            var pd = Database.PocoData.ForType(typeof(T));
+            if (pd == null) throw new InvalidOperationException("Could not find PocoData for " + typeof(T));
 
             try
             {
-                //if it is sql ce or it is a sql server version less than 2008, we need to do individual inserts.
-                var sqlServerSyntax = SqlSyntaxContext.SqlSyntaxProvider as SqlServerSyntaxProvider;
-                if ((sqlServerSyntax != null && (int)sqlServerSyntax.VersionName.Value < (int)SqlServerVersionName.V2008) 
-                    || SqlSyntaxContext.SqlSyntaxProvider is SqlCeSyntaxProvider)
-                {
-                    //SqlCe doesn't support bulk insert statements!
+                int processed = 0;
 
-                    foreach (var poco in collection)
-                    {
-                        db.Insert(poco);
-                    }
-                }
-                else
+                var usedNativeSqlPlatformInserts = useNativeSqlPlatformBulkInsert
+                    && NativeSqlPlatformBulkInsertRecords(db, syntaxProvider, pd, collection, out processed);
+
+                if (usedNativeSqlPlatformInserts == false)
                 {
-                    string[] sqlStatements;
-                    var cmds = db.GenerateBulkInsertCommand(collection, db.Connection, out sqlStatements);
-                    for (var i = 0; i < sqlStatements.Length; i++)
+                    //if it is sql ce or it is a sql server version less than 2008, we need to do individual inserts.
+                    var sqlServerSyntax = syntaxProvider as SqlServerSyntaxProvider;
+                    if ((sqlServerSyntax != null && (int) sqlServerSyntax.GetVersionName(db) < (int) SqlServerVersionName.V2008)
+                        || syntaxProvider is SqlCeSyntaxProvider)
                     {
-                        using (var cmd = cmds[i])
+                        //SqlCe doesn't support bulk insert statements!
+                        foreach (var poco in collection)
                         {
-                            cmd.CommandText = sqlStatements[i];
-                            cmd.ExecuteNonQuery();
+                            db.Insert(poco);
+                        }
+                    }
+                    else
+                    {
+                        //we'll need to generate insert statements instead
+
+                        string[] sqlStatements;
+                        var cmds = db.GenerateBulkInsertCommand(pd, collection, out sqlStatements);
+                        for (var i = 0; i < sqlStatements.Length; i++)
+                        {
+                            using (var cmd = cmds[i])
+                            {
+                                cmd.CommandText = sqlStatements[i];
+                                cmd.ExecuteNonQuery();
+                                processed++;
+                            }
                         }
                     }
                 }
 
                 if (commitTrans)
                 {
-                    tr.Complete();    
+                    tr.Complete();
                 }
+                return processed;
             }
             catch
             {
                 if (commitTrans)
                 {
-                    tr.Dispose();    
+                    tr.Dispose();
                 }
                 throw;
             }
+
+        }
+
+        /// <summary>
+        /// Performs the bulk insertion in the context of a current transaction with an optional parameter to complete the transaction
+        /// when finished
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="db"></param>
+        /// <param name="collection"></param>
+        /// <param name="tr"></param>
+        /// <param name="commitTrans"></param>
+        [Obsolete("Use the method that specifies an SqlSyntaxContext instance instead")]
+        public static void BulkInsertRecords<T>(this Database db, IEnumerable<T> collection, Transaction tr, bool commitTrans = false)
+        {
+            db.BulkInsertRecords<T>(collection, tr, SqlSyntaxContext.SqlSyntaxProvider, commitTrans);
         }
 
         /// <summary>
@@ -216,45 +303,36 @@ namespace Umbraco.Core.Persistence
         /// <typeparam name="T"></typeparam>
         /// <param name="db"></param>
         /// <param name="collection"></param>
-        /// <param name="connection"></param>        
         /// <param name="sql"></param>
+        /// <param name="pd"></param>
         /// <returns>Sql commands with populated command parameters required to execute the sql statement</returns>
         /// <remarks>
-        /// The limits for number of parameters are 2100 (in sql server, I think there's many more allowed in mysql). So 
-        /// we need to detect that many params and split somehow. 
-        /// For some reason the 2100 limit is not actually allowed even though the exception from sql server mentions 2100 as a max, perhaps it is 2099 
+        /// The limits for number of parameters are 2100 (in sql server, I think there's many more allowed in mysql). So
+        /// we need to detect that many params and split somehow.
+        /// For some reason the 2100 limit is not actually allowed even though the exception from sql server mentions 2100 as a max, perhaps it is 2099
         /// that is max. I've reduced it to 2000 anyways.
         /// </remarks>
         internal static IDbCommand[] GenerateBulkInsertCommand<T>(
-            this Database db, 
-            IEnumerable<T> collection, 
-            IDbConnection connection,             
+            this Database db,
+            Database.PocoData pd,
+            IEnumerable<T> collection,
             out string[] sql)
         {
-            //A filter used below a few times to get all columns except result cols and not the primary key if it is auto-incremental
-            Func<Database.PocoData, KeyValuePair<string, Database.PocoColumn>, bool> includeColumn = (data, column) =>
-                {
-                    if (column.Value.ResultColumn) return false;
-                    if (data.TableInfo.AutoIncrement && column.Key == data.TableInfo.PrimaryKey) return false;
-                    return true;
-                };
-
-            var pd = Database.PocoData.ForType(typeof(T));
             var tableName = db.EscapeTableName(pd.TableInfo.TableName);
 
             //get all columns to include and format for sql
-            var cols = string.Join(", ", 
+            var cols = string.Join(", ",
                 pd.Columns
-                .Where(c => includeColumn(pd, c))
+                .Where(c => IncludeColumn(pd, c))
                 .Select(c => tableName + "." + db.EscapeSqlIdentifier(c.Key)).ToArray());
 
             var itemArray = collection.ToArray();
 
             //calculate number of parameters per item
-            var paramsPerItem = pd.Columns.Count(i => includeColumn(pd, i));
-            
+            var paramsPerItem = pd.Columns.Count(i => IncludeColumn(pd, i));
+
             //Example calc:
-            // Given: we have 4168 items in the itemArray, each item contains 8 command parameters (values to be inserterted)                
+            // Given: we have 4168 items in the itemArray, each item contains 8 command parameters (values to be inserterted)
             // 2100 / 8 = 262.5
             // Math.Floor(2100 / 8) = 262 items per trans
             // 4168 / 262 = 15.908... = there will be 16 trans in total
@@ -273,14 +351,14 @@ namespace Umbraco.Core.Persistence
                     .Skip(tIndex * (int)itemsPerTrans)
                     .Take((int)itemsPerTrans);
 
-                var cmd = db.CreateCommand(connection, "");
+                var cmd = db.CreateCommand(db.Connection, string.Empty);
                 var pocoValues = new List<string>();
                 var index = 0;
                 foreach (var poco in itemsForTrans)
                 {
                     var values = new List<string>();
                     //get all columns except result cols and not the primary key if it is auto-incremental
-                    foreach (var i in pd.Columns.Where(x => includeColumn(pd, x)))
+                    foreach (var i in pd.Columns.Where(x => IncludeColumn(pd, x)))
                     {
                         db.AddParam(cmd, i.Value.GetValue(poco), "@");
                         values.Add(string.Format("{0}{1}", "@", index++));
@@ -288,113 +366,233 @@ namespace Umbraco.Core.Persistence
                     pocoValues.Add("(" + string.Join(",", values.ToArray()) + ")");
                 }
 
-                var sqlResult = string.Format("INSERT INTO {0} ({1}) VALUES {2}", tableName, cols, string.Join(", ", pocoValues)); 
+                var sqlResult = string.Format("INSERT INTO {0} ({1}) VALUES {2}", tableName, cols, string.Join(", ", pocoValues));
                 sqlQueries.Add(sqlResult);
                 commands.Add(cmd);
             }
 
             sql = sqlQueries.ToArray();
 
-            return commands.ToArray();    
+            return commands.ToArray();
         }
 
-        public static void CreateTable(this Database db, bool overwrite, Type modelType)
+        /// <summary>
+        /// A filter used below a few times to get all columns except result cols and not the primary key if it is auto-incremental
+        /// </summary>
+        /// <param name="data"></param>
+        /// <param name="column"></param>
+        /// <returns></returns>
+        private static bool IncludeColumn(Database.PocoData data, KeyValuePair<string, Database.PocoColumn> column)
         {
-            var tableDefinition = DefinitionFactory.GetTableDefinition(modelType);
-            var tableName = tableDefinition.Name;
+            if (column.Value.ResultColumn) return false;
+            if (data.TableInfo.AutoIncrement && column.Key == data.TableInfo.PrimaryKey) return false;
+            return true;
+        }
 
-            string createSql = SqlSyntaxContext.SqlSyntaxProvider.Format(tableDefinition);
-            string createPrimaryKeySql = SqlSyntaxContext.SqlSyntaxProvider.FormatPrimaryKey(tableDefinition);
-            var foreignSql = SqlSyntaxContext.SqlSyntaxProvider.Format(tableDefinition.ForeignKeys);
-            var indexSql = SqlSyntaxContext.SqlSyntaxProvider.Format(tableDefinition.Indexes);
+        /// <summary>
+        /// Bulk insert records with Sql BulkCopy or TableDirect or whatever sql platform specific bulk insert records should be used
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="syntaxProvider"></param>
+        /// <param name="pd"></param>
+        /// <param name="collection"></param>
+        /// <param name="processed">The number of records inserted</param>
+        private static bool NativeSqlPlatformBulkInsertRecords<T>(Database db, ISqlSyntaxProvider syntaxProvider, Database.PocoData pd, IEnumerable<T> collection, out int processed)
+        {
 
-            var tableExist = db.TableExist(tableName);
-            if (overwrite && tableExist)
+            var dbConnection = db.Connection;
+
+            //unwrap the profiled connection if there is one
+            var profiledConnection = dbConnection as ProfiledDbConnection;
+            if (profiledConnection != null)
             {
-                db.DropTable(tableName);
-                tableExist = false;
+                dbConnection = profiledConnection.InnerConnection;
             }
 
-            if (tableExist == false)
+            //check if it's SQL or SqlCe
+
+            var sqlConnection = dbConnection as SqlConnection;
+            if (sqlConnection != null)
             {
-                using (var transaction = db.GetTransaction())
+                processed = BulkInsertRecordsSqlServer(db, (SqlServerSyntaxProvider)syntaxProvider, pd, collection);
+                return true;
+            }
+
+            var sqlCeConnection = dbConnection as SqlCeConnection;
+            if (sqlCeConnection != null)
+            {
+                processed = BulkInsertRecordsSqlCe(db, pd, collection);
+                return true;
+            }
+
+            //could not use the SQL server's specific bulk insert operations
+            processed = 0;
+            return false;
+
+        }
+
+        /// <summary>
+        /// Logic used to perform bulk inserts with SqlCe's TableDirect
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="db"></param>
+        /// <param name="pd"></param>
+        /// <param name="collection"></param>
+        /// <returns></returns>
+        internal static int BulkInsertRecordsSqlCe<T>(Database db,
+            Database.PocoData pd,
+            IEnumerable<T> collection)
+        {
+            var cols = pd.Columns.ToArray();
+
+            using (var cmd = db.CreateCommand(db.Connection, string.Empty))
+            {
+                cmd.CommandText = pd.TableInfo.TableName;
+                cmd.CommandType = CommandType.TableDirect;
+                //cmd.Transaction = GetTypedTransaction<SqlCeTransaction>(db.Connection.);
+
+                //get the real command
+                using (var sqlCeCommand = GetTypedCommand<SqlCeCommand>(cmd))
                 {
-                    //Execute the Create Table sql
-                    int created = db.Execute(new Sql(createSql));
-                    LogHelper.Info<Database>(string.Format("Create Table sql {0}:\n {1}", created, createSql));
+                    // This seems to cause problems, I think this is primarily used for retrieval, not
+                    // inserting. see: https://msdn.microsoft.com/en-us/library/system.data.sqlserverce.sqlcecommand.indexname%28v=vs.100%29.aspx?f=255&MSPPError=-2147217396
+                    //sqlCeCommand.IndexName = pd.TableInfo.PrimaryKey;
 
-                    //If any statements exists for the primary key execute them here
-                    if (!string.IsNullOrEmpty(createPrimaryKeySql))
+                    var count = 0;
+                    using (var rs = sqlCeCommand.ExecuteResultSet(ResultSetOptions.Updatable))
                     {
-                        int createdPk = db.Execute(new Sql(createPrimaryKeySql));
-                        LogHelper.Info<Database>(string.Format("Primary Key sql {0}:\n {1}", createdPk, createPrimaryKeySql));
-                    }
+                        var rec = rs.CreateRecord();
 
-                    //Fires the NewTable event, which is used internally to insert base data before adding constrants to the schema
-                    if (NewTable != null)
-                    {
-                        var e = new TableCreationEventArgs();
-
-                        //Turn on identity insert if db provider is not mysql
-                        if (SqlSyntaxContext.SqlSyntaxProvider.SupportsIdentityInsert() && tableDefinition.Columns.Any(x => x.IsIdentity))
-                            db.Execute(new Sql(string.Format("SET IDENTITY_INSERT {0} ON ", SqlSyntaxContext.SqlSyntaxProvider.GetQuotedTableName(tableName))));
-
-                        //Call the NewTable-event to trigger the insert of base/default data
-                        NewTable(tableName, db, e);
-
-                        //Turn off identity insert if db provider is not mysql
-                        if (SqlSyntaxContext.SqlSyntaxProvider.SupportsIdentityInsert() && tableDefinition.Columns.Any(x => x.IsIdentity))
-                            db.Execute(new Sql(string.Format("SET IDENTITY_INSERT {0} OFF;", SqlSyntaxContext.SqlSyntaxProvider.GetQuotedTableName(tableName))));
-
-                        //Special case for MySql
-                        if (SqlSyntaxContext.SqlSyntaxProvider is MySqlSyntaxProvider && tableName.Equals("umbracoUser"))
+                        foreach (var item in collection)
                         {
-                            db.Update<UserDto>("SET id = @IdAfter WHERE id = @IdBefore AND userLogin = @Login", new { IdAfter = 0, IdBefore = 1, Login = "admin" });
+                            for (var i = 0; i < cols.Length; i++)
+                            {
+                                //skip the index if this shouldn't be included (i.e. PK)
+                                if (IncludeColumn(pd, cols[i]))
+                                {
+                                    var val = cols[i].Value.GetValue(item);
+                                    rec.SetValue(i, val);
+                                }
+                            }
+                            rs.Insert(rec);
+                            count++;
                         }
                     }
-
-                    //Loop through foreignkey statements and execute sql
-                    foreach (var sql in foreignSql)
-                    {
-                        int createdFk = db.Execute(new Sql(sql));
-                        LogHelper.Info<Database>(string.Format("Create Foreign Key sql {0}:\n {1}", createdFk, sql));
-                    }
-
-                    //Loop through index statements and execute sql
-                    foreach (var sql in indexSql)
-                    {
-                        int createdIndex = db.Execute(new Sql(sql));
-                        LogHelper.Info<Database>(string.Format("Create Index sql {0}:\n {1}", createdIndex, sql));
-                    }
-
-                    transaction.Complete();
+                    return count;
                 }
-            }
 
-            LogHelper.Info<Database>(string.Format("New table '{0}' was created", tableName));
+            }
         }
 
+        /// <summary>
+        /// Logic used to perform bulk inserts with SqlServer's BulkCopy
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="db"></param>
+        /// <param name="sqlSyntaxProvider"></param>
+        /// <param name="pd"></param>
+        /// <param name="collection"></param>
+        /// <returns></returns>
+        internal static int BulkInsertRecordsSqlServer<T>(Database db, SqlServerSyntaxProvider sqlSyntaxProvider,
+            Database.PocoData pd, IEnumerable<T> collection)
+        {
+            //NOTE: We need to use the original db.Connection here to create the command, but we need to pass in the typed
+            // connection below to the SqlBulkCopy
+            using (var cmd = db.CreateCommand(db.Connection, string.Empty))
+            {
+                using (var copy = new SqlBulkCopy(
+                    GetTypedConnection<SqlConnection>(db.Connection),
+                    SqlBulkCopyOptions.Default,
+                    GetTypedTransaction<SqlTransaction>(cmd.Transaction))
+                {
+                    BulkCopyTimeout = 10000,
+                    DestinationTableName = pd.TableInfo.TableName
+                })
+                {
+                    //var cols = pd.Columns.Where(x => IncludeColumn(pd, x)).Select(x => x.Value).ToArray();
+
+                    using (var bulkReader = new PocoDataDataReader<T, SqlServerSyntaxProvider>(collection, pd, sqlSyntaxProvider))
+                    {
+                        copy.WriteToServer(bulkReader);
+
+                        return bulkReader.RecordsAffected;
+                    }
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// Returns the underlying connection as a typed connection - this is used to unwrap the profiled mini profiler stuff
+        /// </summary>
+        /// <typeparam name="TConnection"></typeparam>
+        /// <param name="connection"></param>
+        /// <returns></returns>
+        private static TConnection GetTypedConnection<TConnection>(IDbConnection connection)
+            where TConnection : class, IDbConnection
+        {
+            var profiled = connection as ProfiledDbConnection;
+            if (profiled != null)
+            {
+                return profiled.InnerConnection as TConnection;
+            }
+            return connection as TConnection;
+        }
+
+        /// <summary>
+        /// Returns the underlying connection as a typed connection - this is used to unwrap the profiled mini profiler stuff
+        /// </summary>
+        /// <typeparam name="TTransaction"></typeparam>
+        /// <param name="connection"></param>
+        /// <returns></returns>
+        private static TTransaction GetTypedTransaction<TTransaction>(IDbTransaction connection)
+            where TTransaction : class, IDbTransaction
+        {
+            var profiled = connection as ProfiledDbTransaction;
+            if (profiled != null)
+            {
+                return profiled.WrappedTransaction as TTransaction;
+            }
+            return connection as TTransaction;
+        }
+
+        /// <summary>
+        /// Returns the underlying connection as a typed connection - this is used to unwrap the profiled mini profiler stuff
+        /// </summary>
+        /// <typeparam name="TCommand"></typeparam>
+        /// <param name="command"></param>
+        /// <returns></returns>
+        private static TCommand GetTypedCommand<TCommand>(IDbCommand command)
+            where TCommand : class, IDbCommand
+        {
+            var profiled = command as ProfiledDbCommand;
+            if (profiled != null)
+            {
+                return profiled.InternalCommand as TCommand;
+            }
+            return command as TCommand;
+        }
+
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
+        public static void CreateTable(this Database db, bool overwrite, Type modelType)
+        {
+            var creator = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            creator.CreateTable(overwrite, modelType);
+        }
+
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void DropTable<T>(this Database db)
             where T : new()
         {
-            Type type = typeof(T);
-            var tableNameAttribute = type.FirstAttribute<TableNameAttribute>();
-            if (tableNameAttribute == null)
-                throw new Exception(
-                    string.Format(
-                        "The Type '{0}' does not contain a TableNameAttribute, which is used to find the name of the table to drop. The operation could not be completed.",
-                        type.Name));
-
-            string tableName = tableNameAttribute.Value;
-            DropTable(db, tableName);
+            var helper = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            helper.DropTable<T>();
         }
 
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void DropTable(this Database db, string tableName)
         {
-            var sql = new Sql(string.Format(
-                SqlSyntaxContext.SqlSyntaxProvider.DropTable,
-                SqlSyntaxContext.SqlSyntaxProvider.GetQuotedTableName(tableName)));
-            db.Execute(sql);
+            var helper = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            helper.DropTable(tableName);
         }
 
         public static void TruncateTable(this Database db, string tableName)
@@ -405,11 +603,13 @@ namespace Umbraco.Core.Persistence
             db.Execute(sql);
         }
 
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static bool TableExist(this Database db, string tableName)
         {
             return SqlSyntaxContext.SqlSyntaxProvider.DoesTableExist(db, tableName);
         }
 
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static bool TableExist(this UmbracoDatabase db, string tableName)
         {
             return SqlSyntaxContext.SqlSyntaxProvider.DoesTableExist(db, tableName);
@@ -421,6 +621,7 @@ namespace Umbraco.Core.Persistence
         /// umbraco instances.
         /// </summary>
         /// <param name="db">Current PetaPoco <see cref="Database"/> object</param>
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void CreateDatabaseSchema(this Database db)
         {
             CreateDatabaseSchema(db, true);
@@ -433,53 +634,21 @@ namespace Umbraco.Core.Persistence
         /// </summary>
         /// <param name="db"></param>
         /// <param name="guardConfiguration"></param>
+        [Obsolete("Use the DatabaseSchemaHelper instead")]
         public static void CreateDatabaseSchema(this Database db, bool guardConfiguration)
         {
-            if (guardConfiguration && ApplicationContext.Current.IsConfigured)
-                throw new Exception("Umbraco is already configured!");
-
-            CreateDatabaseSchemaDo(db);
+            var helper = new DatabaseSchemaHelper(db, LoggerResolver.Current.Logger, SqlSyntaxContext.SqlSyntaxProvider);
+            helper.CreateDatabaseSchema(guardConfiguration, ApplicationContext.Current);
         }
 
-        internal static void UninstallDatabaseSchema(this Database db)
-        {
-            var creation = new DatabaseSchemaCreation(db);
-            creation.UninstallDatabaseSchema();
-        }
-
-        internal static void CreateDatabaseSchemaDo(this Database db, bool guardConfiguration)
-        {
-            if (guardConfiguration && ApplicationContext.Current.IsConfigured)
-                throw new Exception("Umbraco is already configured!");
-
-            CreateDatabaseSchemaDo(db);
-        }
-
-        internal static void CreateDatabaseSchemaDo(this Database db)
-        {
-            NewTable += PetaPocoExtensions_NewTable;
-
-            LogHelper.Info<Database>("Initializing database schema creation");
-
-            var creation = new DatabaseSchemaCreation(db);
-            creation.InitializeDatabaseSchema();
-
-            LogHelper.Info<Database>("Finalized database schema creation");
-
-            NewTable -= PetaPocoExtensions_NewTable;
-        }
-
+        //TODO: What the heck? This makes no sense at all
         public static DatabaseProviders GetDatabaseProvider(this Database db)
         {
             return ApplicationContext.Current.DatabaseContext.DatabaseProvider;
         }
 
-        private static void PetaPocoExtensions_NewTable(string tableName, Database db, TableCreationEventArgs e)
-        {
-            var baseDataCreation = new BaseDataCreation(db);
-            baseDataCreation.InitializeBaseData(tableName);
-        }
+
     }
 
-    internal class TableCreationEventArgs : System.ComponentModel.CancelEventArgs { }
+
 }

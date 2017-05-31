@@ -404,8 +404,7 @@ namespace Umbraco.Core.Models
             return content.Properties
                           .Where(property => propertyGroup.PropertyTypes
                                                           .Select(propertyType => propertyType.Id)
-                                                          .Contains(property.PropertyTypeId))
-                          .OrderBy(x => x.PropertyType.SortOrder);
+                                                          .Contains(property.PropertyTypeId));
         }
 
         /// <summary>
@@ -546,7 +545,7 @@ namespace Umbraco.Core.Models
             if (supportsResizing)
             {
                 //get the original image from the original stream
-                if (fileStream.CanSeek) fileStream.Seek(0, 0);
+                if (fileStream.CanSeek) fileStream.Seek(0, SeekOrigin.Begin);
                 using (var originalImage = Image.FromStream(fileStream))
                 {
                     var additionalSizes = new List<int>();
@@ -560,8 +559,7 @@ namespace Umbraco.Core.Models
                         //Additional thumbnails configured as prevalues on the DataType
                         if (thumbnailSizes != null)
                         {
-                            var sep = (thumbnailSizes.Contains("") == false && thumbnailSizes.Contains(",")) ? ',' : ';';
-                            foreach (var thumb in thumbnailSizes.Split(sep))
+							foreach (var thumb in thumbnailSizes.Split(new[] { ";", "," }, StringSplitOptions.RemoveEmptyEntries))
                             {
                                 int thumbSize;
                                 if (thumb != "" && int.TryParse(thumb, out thumbSize))
@@ -657,12 +655,10 @@ namespace Umbraco.Core.Models
         /// </summary>
         /// <param name="content"></param>
         /// <returns>True if the content has any published versiom otherwise False</returns>
+        [Obsolete("Use the HasPublishedVersion property.", false)]
         public static bool HasPublishedVersion(this IContent content)
         {
-            if (content.HasIdentity == false)
-                return false;
-
-            return ApplicationContext.Current.Services.ContentService.HasPublishedVersion(content.Id);
+            return content.HasPublishedVersion;
         }
 
         #region Tag methods

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Configuration;
 using System.IO;
 using System.Linq;
@@ -12,7 +13,7 @@ namespace umbraco.IO
 	[Obsolete("Use Umbraco.Core.UI.SystemFiles instead")]
 	public class SystemFiles
 	{
-
+        [Obsolete("This file is no longer used and should not be accessed!")]
 		public static string AccessXml
 		{
 			get { return Umbraco.Core.IO.SystemFiles.AccessXml; }
@@ -54,7 +55,9 @@ namespace umbraco.IO
 			get { return Umbraco.Core.IO.SystemFiles.ContentCacheXml; }
 		}
 
-		public static bool ContentCacheXmlIsEphemeral
+        [Obsolete("This is not used and will be removed in future versions")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
+        public static bool ContentCacheXmlIsEphemeral
 		{
 			get { return Umbraco.Core.IO.SystemFiles.ContentCacheXmlStoredInCodeGen; }
 		}

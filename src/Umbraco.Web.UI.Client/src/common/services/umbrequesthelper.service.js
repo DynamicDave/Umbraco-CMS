@@ -3,7 +3,7 @@
 * @name umbraco.services.umbRequestHelper
 * @description A helper object used for sending requests to the server
 **/
-function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogService, notificationsService) {
+function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogService, notificationsService, eventsService) {
     return {
 
         /**
@@ -103,15 +103,15 @@ function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogServ
          * @description
          * This returns a promise with an underlying http call, it is a helper method to reduce
          *  the amount of duplicate code needed to query http resources and automatically handle any 
-         *  Http errors. See /docs/source/using-promises-resources.md
+         *  500 Http server errors. 
          *
-         * @param {object} opts A mixed object which can either be a string representing the error message to be
-         *   returned OR an object containing either:
+         * @param {object} opts A mixed object which can either be a `string` representing the error message to be
+         *   returned OR an `object` containing either:
          *     { success: successCallback, errorMsg: errorMessage }
          *          OR
          *     { success: successCallback, error: errorCallback }
-         *   In both of the above, the successCallback must accept these parameters: data, status, headers, config
-         *   If using the errorCallback it must accept these parameters: data, status, headers, config
+         *   In both of the above, the successCallback must accept these parameters: `data`, `status`, `headers`, `config`
+         *   If using the errorCallback it must accept these parameters: `data`, `status`, `headers`, `config`
          *   The success callback must return the data which will be resolved by the deferred object.
          *   The error callback must return an object containing: {errorMsg: errorMessage, data: originalData, status: status }
          */
@@ -158,9 +158,10 @@ function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogServ
 
                     //show a ysod dialog
                     if (Umbraco.Sys.ServerVariables["isDebuggingEnabled"] === true) {
-                        dialogService.ysodDialog({
-                            errorMsg: result.errorMsg,
-                            data: result.data
+                        eventsService.emit('app.ysod',
+                        {
+                            errorMsg: 'An error occured',
+                            data: data
                         });
                     }
                     else {
@@ -169,16 +170,14 @@ function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogServ
                     }
                     
                 }
-                else {
 
-                    //return an error object including the error message for UI
-                    deferred.reject({
-                        errorMsg: result.errorMsg,
-                        data: result.data,
-                        status: result.status
-                    });
+                //return an error object including the error message for UI
+                deferred.reject({
+                    errorMsg: result.errorMsg,
+                    data: result.data,
+                    status: result.status
+                });
 
-                }
 
             });
 
@@ -248,13 +247,14 @@ function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogServ
                         //This is a bit of a hack to check if the error is due to a file being uploaded that is too large,
                         // we have to just check for the existence of a string value but currently that is the best way to
                         // do this since it's very hacky/difficult to catch this on the server
-                        if (data.indexOf("Maximum request length exceeded") >= 0) {
+                        if (typeof data !== "undefined" && typeof data.indexOf === "function" && data.indexOf("Maximum request length exceeded") >= 0) {
                             notificationsService.error("Server error", "The uploaded file was too large, check with your site administrator to adjust the maximum size allowed");
                         }                        
                         else if (Umbraco.Sys.ServerVariables["isDebuggingEnabled"] === true) {
                             //show a ysod dialog
-                            dialogService.ysodDialog({
-                                errorMsg: 'An error occurred',
+                            eventsService.emit('app.ysod',
+                            {
+                                errorMsg: 'An error occured',
                                 data: data
                             });
                         }
@@ -264,15 +264,14 @@ function umbRequestHelper($http, $q, umbDataFormatter, angularHelper, dialogServ
                         }
                         
                     }
-                    else {
-
-                        //return an error object including the error message for UI
-                        deferred.reject({
-                            errorMsg: 'An error occurred',
-                            data: data,
-                            status: status
-                        });
-                    }
+                    
+                    //return an error object including the error message for UI
+                    deferred.reject({
+                        errorMsg: 'An error occurred',
+                        data: data,
+                        status: status
+                    });
+                   
 
                 });
 

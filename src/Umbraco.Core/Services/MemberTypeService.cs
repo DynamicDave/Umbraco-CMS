@@ -2,43 +2,31 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
-using Umbraco.Core.Auditing;
 using Umbraco.Core.Events;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Models;
 using Umbraco.Core.Persistence;
-using Umbraco.Core.Persistence.Querying;
 using Umbraco.Core.Persistence.UnitOfWork;
 
 namespace Umbraco.Core.Services
 {
     public class MemberTypeService : ContentTypeServiceBase, IMemberTypeService
     {
-        private readonly IDatabaseUnitOfWorkProvider _uowProvider;
-        private readonly RepositoryFactory _repositoryFactory;
         private readonly IMemberService _memberService;
 
         private static readonly ReaderWriterLockSlim Locker = new ReaderWriterLockSlim();
+        
 
-        public MemberTypeService(IMemberService memberService)
-            : this(new PetaPocoUnitOfWorkProvider(), new RepositoryFactory(), memberService)
-        {}
-
-        public MemberTypeService(RepositoryFactory repositoryFactory, IMemberService memberService)
-            : this(new PetaPocoUnitOfWorkProvider(), repositoryFactory, memberService)
-        { }
-
-        public MemberTypeService(IDatabaseUnitOfWorkProvider provider, RepositoryFactory repositoryFactory, IMemberService memberService)
+        public MemberTypeService(IDatabaseUnitOfWorkProvider provider, RepositoryFactory repositoryFactory, ILogger logger, IEventMessagesFactory eventMessagesFactory, IMemberService memberService)
+            : base(provider, repositoryFactory, logger, eventMessagesFactory)
         {
-            if (provider == null) throw new ArgumentNullException("provider");
-            if (repositoryFactory == null) throw new ArgumentNullException("repositoryFactory");
-            _uowProvider = provider;
-            _repositoryFactory = repositoryFactory;
+            if (memberService == null) throw new ArgumentNullException("memberService");
             _memberService = memberService;
         }
 
         public IEnumerable<IMemberType> GetAll(params int[] ids)
         {
-            using (var repository = _repositoryFactory.CreateMemberTypeRepository(_uowProvider.GetUnitOfWork()))
+            using (var repository = RepositoryFactory.CreateMemberTypeRepository(UowProvider.GetUnitOfWork()))
             {
                 return repository.GetAll(ids);
             }
@@ -51,9 +39,22 @@ namespace Umbraco.Core.Services
         /// <returns><see cref="IMemberType"/></returns>
         public IMemberType Get(int id)
         {
-            using (var repository = _repositoryFactory.CreateMemberTypeRepository(_uowProvider.GetUnitOfWork()))
+            using (var repository = RepositoryFactory.CreateMemberTypeRepository(UowProvider.GetUnitOfWork()))
             {
                 return repository.Get(id);
+            }
+        }
+
+        /// <summary>
+        /// Gets an <see cref="IMemberType"/> object by its Key
+        /// </summary>
+        /// <param name="key">Key of the <see cref="IMemberType"/> to retrieve</param>
+        /// <returns><see cref="IMemberType"/></returns>
+        public IMemberType Get(Guid key)
+        {
+            using (var repository = RepositoryFactory.CreateMemberTypeRepository(UowProvider.GetUnitOfWork()))
+            {
+                return repository.Get(key);
             }
         }
 
@@ -64,12 +65,9 @@ namespace Umbraco.Core.Services
         /// <returns><see cref="IMemberType"/></returns>
         public IMemberType Get(string alias)
         {
-            using (var repository = _repositoryFactory.CreateMemberTypeRepository(_uowProvider.GetUnitOfWork()))
+            using (var repository = RepositoryFactory.CreateMemberTypeRepository(UowProvider.GetUnitOfWork()))
             {
-                var query = Query<IMemberType>.Builder.Where(x => x.Alias == alias);
-                var contentTypes = repository.GetByQuery(query);
-
-                return contentTypes.FirstOrDefault();
+                return repository.Get(alias);
             }
         }
 
@@ -78,12 +76,19 @@ namespace Umbraco.Core.Services
             if (Saving.IsRaisedEventCancelled(new SaveEventArgs<IMemberType>(memberType), this))
                 return;
 
+            if (string.IsNullOrWhiteSpace(memberType.Name))
+            {
+                throw new ArgumentException("Cannot save MemberType with empty name.");
+            }
+
             using (new WriteLock(Locker))
             {
-                var uow = _uowProvider.GetUnitOfWork();
-                using (var repository = _repositoryFactory.CreateMemberTypeRepository(uow))
+                var uow = UowProvider.GetUnitOfWork();
+                using (var repository = RepositoryFactory.CreateMemberTypeRepository(uow))
                 {
                     memberType.CreatorId = userId;
+                    if (memberType.Description == string.Empty)
+                        memberType.Description = null;
                     repository.AddOrUpdate(memberType);
 
                     uow.Commit();
@@ -103,12 +108,14 @@ namespace Umbraco.Core.Services
 
             using (new WriteLock(Locker))
             {
-                var uow = _uowProvider.GetUnitOfWork();
-                using (var repository = _repositoryFactory.CreateMemberTypeRepository(uow))
+                var uow = UowProvider.GetUnitOfWork();
+                using (var repository = RepositoryFactory.CreateMemberTypeRepository(uow))
                 {
                     foreach (var memberType in asArray)
                     {
                         memberType.CreatorId = userId;
+                        if (memberType.Description == string.Empty)
+                            memberType.Description = null;
                         repository.AddOrUpdate(memberType);
                     }
 
@@ -130,8 +137,8 @@ namespace Umbraco.Core.Services
             {
                 _memberService.DeleteMembersOfType(memberType.Id);
 
-                var uow = _uowProvider.GetUnitOfWork();
-                using (var repository = _repositoryFactory.CreateMemberTypeRepository(uow))
+                var uow = UowProvider.GetUnitOfWork();
+                using (var repository = RepositoryFactory.CreateMemberTypeRepository(uow))
                 {
                     repository.Delete(memberType);
                     uow.Commit();
@@ -155,8 +162,8 @@ namespace Umbraco.Core.Services
                     _memberService.DeleteMembersOfType(contentType.Id);
                 }
 
-                var uow = _uowProvider.GetUnitOfWork();
-                using (var repository = _repositoryFactory.CreateMemberTypeRepository(uow))
+                var uow = UowProvider.GetUnitOfWork();
+                using (var repository = RepositoryFactory.CreateMemberTypeRepository(uow))
                 {
                     foreach (var memberType in asArray)
                     {

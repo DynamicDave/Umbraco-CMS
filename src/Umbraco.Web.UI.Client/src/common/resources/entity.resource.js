@@ -36,6 +36,16 @@ function entityResource($q, $http, umbRequestHelper) {
     //the factory object returned
     return {
         
+        getSafeAlias: function (value, camelCase) {
+
+            return umbRequestHelper.resourcePromise(
+               $http.get(
+                   umbRequestHelper.getApiUrl(
+                       "entityApiBaseUrl",
+                       "GetSafeAlias", { value: value, camelCase: camelCase })),
+               'Failed to retrieve content type scaffold');
+        },
+
         /**
          * @ngdoc method
          * @name umbraco.resources.entityResource#getPath
@@ -99,16 +109,6 @@ function entityResource($q, $http, umbRequestHelper) {
                        [{ id: id}, {type: type }])),
                'Failed to retrieve entity data for id ' + id);
         },
-        
-        getByQuery: function (query, nodeContextId, type) {            
-            return umbRequestHelper.resourcePromise(
-               $http.get(
-                   umbRequestHelper.getApiUrl(
-                       "entityApiBaseUrl",
-                       "GetByQuery",
-                       [{query: query},{ nodeContextId: nodeContextId}, {type: type }])),
-               'Failed to retrieve entity data for query ' + query);
-        },
 
         /**
          * @ngdoc method
@@ -139,6 +139,12 @@ function entityResource($q, $http, umbRequestHelper) {
             _.each(ids, function(item) {
                 query += "ids=" + item + "&";
             });
+
+            // if ids array is empty we need a empty variable in the querystring otherwise the service returns a error
+            if (ids.length === 0) {
+                query += "ids=&";
+            }
+
             query += "type=" + type;
 
             return umbRequestHelper.resourcePromise(
@@ -152,7 +158,41 @@ function entityResource($q, $http, umbRequestHelper) {
 
         /**
          * @ngdoc method
-         * @name umbraco.resources.entityResource#getEntityById
+         * @name umbraco.resources.entityResource#getByQuery
+         * @methodOf umbraco.resources.entityResource
+         *
+         * @description
+         * Gets an entity from a given xpath
+         *
+         * ##usage
+         * <pre>
+         * //get content by xpath
+         * entityResource.getByQuery("$current", -1, "Document")
+         *    .then(function(ent) {
+         *        var myDoc = ent; 
+         *        alert('its here!');
+         *    });
+         * </pre> 
+         * 
+         * @param {string} query xpath to use in query
+         * @param {Int} nodeContextId id id to start from
+         * @param {string} type Object type name        
+         * @returns {Promise} resourcePromise object containing the entity.
+         *
+         */
+        getByQuery: function (query, nodeContextId, type) {
+            return umbRequestHelper.resourcePromise(
+               $http.get(
+                   umbRequestHelper.getApiUrl(
+                       "entityApiBaseUrl",
+                       "GetByQuery",
+                       [{ query: query }, { nodeContextId: nodeContextId }, { type: type }])),
+               'Failed to retrieve entity data for query ' + query);
+        },
+
+        /**
+         * @ngdoc method
+         * @name umbraco.resources.entityResource#getAll
          * @methodOf umbraco.resources.entityResource
          *
          * @description
@@ -244,7 +284,7 @@ function entityResource($q, $http, umbRequestHelper) {
      
         /**
          * @ngdoc method
-         * @name umbraco.resources.entityResource#searchMedia
+         * @name umbraco.resources.entityResource#search
          * @methodOf umbraco.resources.entityResource
          *
          * @description

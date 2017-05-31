@@ -39,9 +39,8 @@ namespace umbraco.cms.businesslogic.workflow
         public char ActionId { get; private set; }
 
         /// <summary>
-        /// Gets the SQL helper.
+        /// Unused, please do not use
         /// </summary>
-        /// <value>The SQL helper.</value>
         [Obsolete("Obsolete, For querying the database use the new UmbracoDatabase object ApplicationContext.Current.DatabaseContext.Database", false)]
         protected static ISqlHelper SqlHelper
         {
@@ -81,7 +80,7 @@ namespace umbraco.cms.businesslogic.workflow
             var pUser = ApplicationContext.Current.Services.UserService.GetUserById(performingUser.Id);
 
             nService.SendNotifications(
-                pUser, documentObject.Content, action.Letter.ToString(CultureInfo.InvariantCulture), ui.Text(action.Alias), 
+                pUser, documentObject.ContentEntity, action.Letter.ToString(CultureInfo.InvariantCulture), ui.Text(action.Alias), 
                 new HttpContextWrapper(HttpContext.Current),
                 (user, strings) => ui.Text("notifications", "mailSubject", strings, mailingUser),
                 (user, strings) => UmbracoSettings.NotificationDisableHtmlEmail

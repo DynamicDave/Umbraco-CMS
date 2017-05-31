@@ -9,6 +9,9 @@ namespace Umbraco.Core.Cache
     /// <summary>
     /// A cache provider that caches items in the HttpContext.Items
     /// </summary>
+    /// <remarks>
+    /// If the Items collection is null, then this provider has no effect
+    /// </remarks>
     internal class HttpRequestCacheProvider : DictionaryCacheProviderBase
     {
         // context provider
@@ -34,6 +37,11 @@ namespace Umbraco.Core.Cache
             get { return _context != null ? _context.Items : HttpContext.Current.Items; }
         }
 
+        private bool HasContextItems
+        {
+            get { return (_context != null && _context.Items != null) || HttpContext.Current != null; }
+        }
+
         // for unit tests
         public HttpRequestCacheProvider(HttpContextBase context)
         {
@@ -50,18 +58,23 @@ namespace Umbraco.Core.Cache
         protected override IEnumerable<DictionaryEntry> GetDictionaryEntries()
         {
             const string prefix = CacheItemPrefix + "-";
+
+            if (HasContextItems == false) return Enumerable.Empty<DictionaryEntry>();
+
             return ContextItems.Cast<DictionaryEntry>()
                 .Where(x => x.Key is string && ((string)x.Key).StartsWith(prefix));
         }
 
         protected override void RemoveEntry(string key)
         {
+            if (HasContextItems == false) return;
+
             ContextItems.Remove(key);
         }
 
         protected override object GetEntry(string key)
         {
-            return ContextItems[key];
+            return HasContextItems ? ContextItems[key] : null;
         }
 
         #region Lock
@@ -81,7 +94,9 @@ namespace Umbraco.Core.Cache
 
             get
             {
-                return new MonitorLock(ContextItems.SyncRoot);
+                return HasContextItems 
+                    ? (IDisposable) new MonitorLock(ContextItems.SyncRoot) 
+                    : new NoopLocker();
             }
         }
 
@@ -91,6 +106,9 @@ namespace Umbraco.Core.Cache
 
         public override object GetCacheItem(string cacheKey, Func<object> getCacheItem)
         {
+            //no place to cache so just return the callback result
+            if (HasContextItems == false) return getCacheItem();
+
             cacheKey = GetCacheKey(cacheKey);
 
             Lazy<object> result;
@@ -102,7 +120,7 @@ namespace Umbraco.Core.Cache
                 // cannot create value within the lock, so if result.IsValueCreated is false, just
                 // do nothing here - means that if creation throws, a race condition could cause
                 // more than one thread to reach the return statement below and throw - accepted.
-                
+
                 if (result == null || GetSafeLazyValue(result, true) == null) // get non-created as NonCreatedValue & exceptions as null
                 {
                     result = GetSafeLazy(getCacheItem);
@@ -122,11 +140,16 @@ namespace Umbraco.Core.Cache
             if (eh != null) throw eh.Exception; // throw once!
             return value;
         }
-        
+
         #endregion
 
         #region Insert
         #endregion
 
+        private class NoopLocker : DisposableObject
+        {
+            protected override void DisposeResources()
+            { }
+        }
     }
 }

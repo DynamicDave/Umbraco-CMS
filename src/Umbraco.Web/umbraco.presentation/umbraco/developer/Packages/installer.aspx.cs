@@ -13,6 +13,7 @@ using System.Web.UI.HtmlControls;
 using System.Xml;
 using System.Xml.XPath;
 using Umbraco.Core.IO;
+using Umbraco.Core.Logging;
 using Umbraco.Web;
 using umbraco.BasePages;
 using umbraco.BusinessLogic;
@@ -25,7 +26,8 @@ namespace umbraco.presentation.developer.packages
     /// <summary>
     /// Summary description for packager.
     /// </summary>
-    public partial class Installer : UmbracoEnsuredPage
+    [Obsolete("This should not be used and will be removed in v8, this is kept here only for backwards compat reasons, this page should never be rendered/used")]
+    public class Installer : UmbracoEnsuredPage
     {
         public Installer()
         {
@@ -274,6 +276,9 @@ namespace umbraco.presentation.developer.packages
                 case "finished":
                     PerformFinishedAction(packageId, dir, Request.GetItemAsString("customUrl"));
                     break;
+                case "uninstalled":
+                    PerformUninstalledAction();
+                    break;
                 default:
                     break;
             }
@@ -300,6 +305,13 @@ namespace umbraco.presentation.developer.packages
             pane_success.Visible = true;
 
             PerformPostInstallCleanup(packageId, dir);
+        }
+
+        private void PerformUninstalledAction()
+        {
+            HideAllPanes();
+            Panel1.Text = "Package has been uninstalled";
+            pane_uninstalled.Visible = true;
         }
 
         /// <summary>
@@ -355,7 +367,7 @@ namespace umbraco.presentation.developer.packages
             _installer.InstallCleanUp(packageId, dir);
 
             // Update ClientDependency version
-            var clientDependencyConfig = new Umbraco.Core.Configuration.ClientDependencyConfiguration();
+            var clientDependencyConfig = new Umbraco.Core.Configuration.ClientDependencyConfiguration(LoggerResolver.Current.Logger);
             var clientDependencyUpdated = clientDependencyConfig.IncreaseVersionNumber();
             
             //clear the tree cache - we'll do this here even though the browser will reload, but just in case it doesn't can't hurt.
@@ -742,6 +754,9 @@ namespace umbraco.presentation.developer.packages
         /// To modify move field declaration from designer file to code-behind file.
         /// </remarks>
         protected global::umbraco.uicontrols.Pane pane_installing;
+
+        protected global::umbraco.uicontrols.Pane pane_uninstalled;
+
 
         /// <summary>
         /// progBar2 control.

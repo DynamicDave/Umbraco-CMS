@@ -1,6 +1,9 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Linq;
+using Moq;
 using NUnit.Framework;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Persistence;
 using Umbraco.Core.Persistence.Migrations;
 using Umbraco.Core.Persistence.SqlSyntax;
@@ -11,18 +14,13 @@ namespace Umbraco.Tests.Migrations
     [TestFixture]
     public class AlterMigrationTests
     {
-        [SetUp]
-        public void SetUp()
-        {
-            SqlSyntaxContext.SqlSyntaxProvider = SqlCeSyntax.Provider;
-        }
 
         [Test]
         public void Drop_Foreign_Key()
         {
             // Arrange
-            var context = new MigrationContext(DatabaseProviders.SqlServerCE, null);
-            var stub = new DropForeignKeyMigrationStub();
+            var context = new MigrationContext(DatabaseProviders.SqlServerCE, null, Mock.Of<ILogger>());
+            var stub = new DropForeignKeyMigrationStub(new SqlCeSyntaxProvider(), Mock.Of<ILogger>());
 
             // Act
             stub.GetUpExpressions(context);
@@ -38,8 +36,8 @@ namespace Umbraco.Tests.Migrations
         public void Can_Get_Up_Migration_From_MigrationStub()
         {
             // Arrange
-            var context = new MigrationContext(DatabaseProviders.SqlServerCE, null);
-            var stub = new AlterUserTableMigrationStub();
+            var context = new MigrationContext(DatabaseProviders.SqlServerCE, null, Mock.Of<ILogger>());
+            var stub = new AlterUserTableMigrationStub(new SqlCeSyntaxProvider(), Mock.Of<ILogger>());
 
             // Act
             stub.GetUpExpressions(context);
@@ -48,11 +46,11 @@ namespace Umbraco.Tests.Migrations
             Assert.That(context.Expressions.Any(), Is.True);
 
             //Console output
-            Console.WriteLine("Number of expressions in context: {0}", context.Expressions.Count);
-            Console.WriteLine("");
+            Debug.Print("Number of expressions in context: {0}", context.Expressions.Count);
+            Debug.Print("");
             foreach (var expression in context.Expressions)
             {
-                Console.WriteLine(expression.ToString());
+                Debug.Print(expression.ToString());
             }
         }
     }

@@ -1,16 +1,14 @@
 using System;
-using System.Data;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
-using System.Runtime.CompilerServices;
 using Umbraco.Core;
 using Umbraco.Core.Cache;
 using Umbraco.Core.IO;
 using Umbraco.Core.Logging;
 using Umbraco.Core.Models;
+using Umbraco.Core.Services;
 using umbraco.DataLayer;
 using umbraco.BusinessLogic;
 using System.Linq;
@@ -32,8 +30,12 @@ namespace umbraco.cms.businesslogic.macro
 	public class Macro
 	{
         //initialize empty model
-	    internal IMacro MacroItem = new Umbraco.Core.Models.Macro();
-
+	    internal IMacro MacroEntity = new Umbraco.Core.Models.Macro();
+        
+        /// <summary>
+        /// Unused, please do not use
+        /// </summary>
+        [Obsolete("Obsolete, For querying the database use the new UmbracoDatabase object ApplicationContext.Current.DatabaseContext.Database", false)]
         protected static ISqlHelper SqlHelper
         {
             get { return Application.SqlHelper; }
@@ -44,7 +46,7 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public int Id 
 		{
-			get { return MacroItem.Id; }
+			get { return MacroEntity.Id; }
 		}
 		
 		/// <summary>
@@ -52,8 +54,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public bool UseInEditor 
 		{
-            get { return MacroItem.UseInEditor; }
-			set { MacroItem.UseInEditor = value; }
+            get { return MacroEntity.UseInEditor; }
+			set { MacroEntity.UseInEditor = value; }
 		}
 
 		/// <summary>
@@ -64,8 +66,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public int RefreshRate
 		{
-            get { return MacroItem.CacheDuration; }
-			set { MacroItem.CacheDuration = value; }
+            get { return MacroEntity.CacheDuration; }
+			set { MacroEntity.CacheDuration = value; }
 		}
 
         /// <summary>
@@ -75,8 +77,8 @@ namespace umbraco.cms.businesslogic.macro
         /// </summary>
 		public string Alias
 		{
-			get { return MacroItem.Alias; }
-			set { MacroItem.Alias = value; }
+			get { return MacroEntity.Alias; }
+			set { MacroEntity.Alias = value; }
 		}
 		
 		/// <summary>
@@ -84,8 +86,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public string Name
 		{
-            get { return MacroItem.Name; }
-            set { MacroItem.Name = value; }
+            get { return MacroEntity.Name; }
+            set { MacroEntity.Name = value; }
 		}
 
 		/// <summary>
@@ -95,8 +97,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public string Assembly
 		{
-            get { return MacroItem.ControlAssembly; }
-            set { MacroItem.ControlAssembly = value; }
+            get { return MacroEntity.ControlAssembly; }
+            set { MacroEntity.ControlAssembly = value; }
 		}
 
 		/// <summary>
@@ -107,8 +109,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </remarks>
 		public string Type
 		{
-            get { return MacroItem.ControlType; }
-            set { MacroItem.ControlType = value; }
+            get { return MacroEntity.ControlType; }
+            set { MacroEntity.ControlType = value; }
 		}
 
 		/// <summary>
@@ -118,8 +120,8 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		public string Xslt
 		{
-            get { return MacroItem.XsltPath; }
-            set { MacroItem.XsltPath = value; }
+            get { return MacroEntity.XsltPath; }
+            set { MacroEntity.XsltPath = value; }
 		}
 
 	    /// <summary>
@@ -132,8 +134,8 @@ namespace umbraco.cms.businesslogic.macro
 	    /// </remarks>
 	    public string ScriptingFile
 	    {
-	        get { return MacroItem.ScriptPath; }
-            set { MacroItem.ScriptPath = value; }
+	        get { return MacroEntity.ScriptPath; }
+            set { MacroEntity.ScriptPath = value; }
 	    }
 
 	    /// <summary>
@@ -143,8 +145,8 @@ namespace umbraco.cms.businesslogic.macro
 	    /// </summary>
 	    public bool RenderContent
 	    {
-            get { return MacroItem.DontRender == false; }
-            set { MacroItem.DontRender = value == false; }
+            get { return MacroEntity.DontRender == false; }
+            set { MacroEntity.DontRender = value == false; }
 	    }
 
 	    /// <summary>
@@ -153,8 +155,8 @@ namespace umbraco.cms.businesslogic.macro
 	    /// <value><c>true</c> if [cache personalized]; otherwise, <c>false</c>.</value>
 	    public bool CachePersonalized
 	    {
-            get { return MacroItem.CacheByMember; }
-            set { MacroItem.CacheByMember = value; }
+            get { return MacroEntity.CacheByMember; }
+            set { MacroEntity.CacheByMember = value; }
 	    }
 
 	    /// <summary>
@@ -163,8 +165,8 @@ namespace umbraco.cms.businesslogic.macro
 	    /// <value><c>true</c> if [cache by page]; otherwise, <c>false</c>.</value>
 	    public bool CacheByPage
 	    {
-            get { return MacroItem.CacheByPage; }
-            set { MacroItem.CacheByPage = value; }
+            get { return MacroEntity.CacheByPage; }
+            set { MacroEntity.CacheByPage = value; }
 	    }
 
 	    /// <summary>
@@ -174,7 +176,7 @@ namespace umbraco.cms.businesslogic.macro
 	    {
 	        get
 	        {
-	            return MacroItem.Properties.Select(x => new MacroProperty
+	            return MacroEntity.Properties.Select(x => new MacroProperty
 	                {
 	                    Alias = x.Alias,
 	                    Name = x.Name,
@@ -184,41 +186,46 @@ namespace umbraco.cms.businesslogic.macro
 	                }).ToArray();
 	        }
 	    }
-        
-		/// <summary>
-		/// Macro initializer
-		/// </summary>
-		public Macro()
+
+        /// <summary>
+        /// Macro initializer
+        /// </summary>
+        [Obsolete("This should no longer be used, use the IMacroService and related models instead")]
+        public Macro()
 		{
 		}
 
-		/// <summary>
-		/// Macro initializer
-		/// </summary>
-		/// <param name="Id">The id of the macro</param>
-		public Macro(int Id)
+        /// <summary>
+        /// Macro initializer
+        /// </summary>
+        /// <param name="Id">The id of the macro</param>
+        [Obsolete("This should no longer be used, use the IMacroService and related models instead")]
+        public Macro(int Id)
 		{
             Setup(Id);
 		}
 
+        [Obsolete("This should no longer be used, use the IMacroService and related models instead")]
         internal Macro(IMacro macro)
         {
-            MacroItem = macro;
+            MacroEntity = macro;
         }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Macro"/> class.
         /// </summary>
         /// <param name="alias">The alias.</param>
+        [Obsolete("This should no longer be used, use the IMacroService and related models instead")]
         public Macro(string alias)
         {
             Setup(alias);
         }
 
-	    /// <summary>
-	    /// Used to persist object changes to the database. In Version3.0 it's just a stub for future compatibility
-	    /// </summary>
-	    public virtual void Save()
+        /// <summary>
+        /// Used to persist object changes to the database. In Version3.0 it's just a stub for future compatibility
+        /// </summary>
+        [Obsolete("This should no longer be used, use the IMacroService and related models instead")]
+        public virtual void Save()
 	    {
 	        //event
 	        var e = new SaveEventArgs();
@@ -226,7 +233,7 @@ namespace umbraco.cms.businesslogic.macro
 
 	        if (e.Cancel == false)
 	        {
-	            ApplicationContext.Current.Services.MacroService.Save(MacroItem);
+	            ApplicationContext.Current.Services.MacroService.Save(MacroEntity);
 
 	            FireAfterSave(e);
 	        }
@@ -243,12 +250,13 @@ namespace umbraco.cms.businesslogic.macro
 
 		    if (e.Cancel == false)
 		    {
-		        ApplicationContext.Current.Services.MacroService.Delete(MacroItem);
+		        ApplicationContext.Current.Services.MacroService.Delete(MacroEntity);
 
 		        FireAfterDelete(e);
 		    }
 		}
 
+        [Obsolete("This is no longer used, use the IMacroService and related models instead")]
         public static Macro Import(XmlNode n)
         {
             var alias = XmlHelper.GetNodeValue(n.SelectSingleNode("alias"));
@@ -338,7 +346,7 @@ namespace umbraco.cms.businesslogic.macro
             if (macro == null)
                 throw new ArgumentException(string.Format("No Macro exists with id '{0}'", id));
 
-		    MacroItem = macro;
+		    MacroEntity = macro;
 		}
 
         private void Setup(string alias)
@@ -348,7 +356,7 @@ namespace umbraco.cms.businesslogic.macro
             if (macro == null)
                 throw new ArgumentException(string.Format("No Macro exists with alias '{0}'", alias));
 
-            MacroItem = macro;
+            MacroEntity = macro;
         }
 
 	    /// <summary>
@@ -358,25 +366,9 @@ namespace umbraco.cms.businesslogic.macro
 	    /// <returns>An xmlrepresentation of the macro</returns>
 	    public XmlNode ToXml(XmlDocument xd)
 	    {
-	        XmlNode doc = xd.CreateElement("macro");
-
-	        // info section
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "name", this.Name));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "alias", this.Alias));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "scriptType", this.Type));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "scriptAssembly", this.Assembly));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "xslt", this.Xslt));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "useInEditor", this.UseInEditor.ToString()));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "refreshRate", this.RefreshRate.ToString(CultureInfo.InvariantCulture)));
-	        doc.AppendChild(XmlHelper.AddTextNode(xd, "scriptingFile", this.ScriptingFile));
-
-	        // properties
-	        XmlNode props = xd.CreateElement("properties");
-	        foreach (var p in this.Properties)
-	            props.AppendChild(p.ToXml(xd));
-	        doc.AppendChild(props);
-
-	        return doc;
+            var serializer = new EntityXmlSerializer();
+            var xml = serializer.Serialize(MacroEntity);
+            return xml.GetXmlNode(xd);
 	    }
 
 	    [Obsolete("This does nothing")]
@@ -392,7 +384,6 @@ namespace umbraco.cms.businesslogic.macro
 		/// </summary>
 		/// <param name="Name">Userfriendly name</param>
 		/// <returns>The newly macro</returns>
-        [MethodImpl(MethodImplOptions.Synchronized)]
 		public static Macro MakeNew(string Name) 
 		{
 		    var macro = new Umbraco.Core.Models.Macro
@@ -430,10 +421,10 @@ namespace umbraco.cms.businesslogic.macro
 		/// <returns>If the macro with the given alias exists, it returns the macro, else null</returns>
         public static Macro GetByAlias(string alias)
 		{
-		    return ApplicationContext.Current.ApplicationCache.GetCacheItem(
+		    return ApplicationContext.Current.ApplicationCache.RuntimeCache.GetCacheItem<Macro>(
 		        GetCacheKey(alias),
-		        TimeSpan.FromMinutes(30),
-		        () =>
+		        timeout:        TimeSpan.FromMinutes(30),
+		        getCacheItem:   () =>
 		            {
                         var macro = ApplicationContext.Current.Services.MacroService.GetByAlias(alias);
 		                if (macro == null) return null;
@@ -443,10 +434,10 @@ namespace umbraco.cms.businesslogic.macro
 
         public static Macro GetById(int id)
         {
-            return ApplicationContext.Current.ApplicationCache.GetCacheItem(
+            return ApplicationContext.Current.ApplicationCache.RuntimeCache.GetCacheItem<Macro>(
                 GetCacheKey(string.Format("macro_via_id_{0}", id)),
-                TimeSpan.FromMinutes(30),
-                () =>
+                timeout:        TimeSpan.FromMinutes(30),
+                getCacheItem:   () =>
                     {
                         var macro = ApplicationContext.Current.Services.MacroService.GetById(id);
                         if (macro == null) return null;

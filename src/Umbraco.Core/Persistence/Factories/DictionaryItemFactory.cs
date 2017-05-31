@@ -4,21 +4,29 @@ using Umbraco.Core.Models.Rdbms;
 
 namespace Umbraco.Core.Persistence.Factories
 {
-    internal class DictionaryItemFactory : IEntityFactory<IDictionaryItem, DictionaryDto>
+    internal class DictionaryItemFactory 
     {
         #region Implementation of IEntityFactory<DictionaryItem,DictionaryDto>
 
         public IDictionaryItem BuildEntity(DictionaryDto dto)
         {
-            var item = new DictionaryItem(dto.Parent, dto.Key)
-                       {
-                           Id = dto.PrimaryKey, 
-                           Key = dto.UniqueId
-                       };
-            //on initial construction we don't want to have dirty properties tracked
-            // http://issues.umbraco.org/issue/U4-1946
-            item.ResetDirtyProperties(false);
-            return item;
+            var item = new DictionaryItem(dto.Parent, dto.Key);
+
+            try
+            {
+                item.DisableChangeTracking();
+
+                item.Id = dto.PrimaryKey;
+                item.Key = dto.UniqueId;
+                //on initial construction we don't want to have dirty properties tracked
+                // http://issues.umbraco.org/issue/U4-1946
+                item.ResetDirtyProperties(false);
+                return item;
+            }
+            finally
+            {
+                item.EnableChangeTracking();
+            }
         }
 
         public DictionaryDto BuildDto(IDictionaryItem entity)
@@ -42,7 +50,7 @@ namespace Umbraco.Core.Persistence.Factories
             {
                 var text = new LanguageTextDto
                                {
-                                   LanguageId = translation.Language.Id,
+                                   LanguageId = translation.LanguageId,
                                    UniqueId = translation.Key,
                                    Value = translation.Value
                                };

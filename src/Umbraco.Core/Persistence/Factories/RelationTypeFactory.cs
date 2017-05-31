@@ -3,22 +3,31 @@ using Umbraco.Core.Models.Rdbms;
 
 namespace Umbraco.Core.Persistence.Factories
 {
-    internal class RelationTypeFactory : IEntityFactory<IRelationType, RelationTypeDto>
+    internal class RelationTypeFactory 
     {
         #region Implementation of IEntityFactory<RelationType,RelationTypeDto>
 
         public IRelationType BuildEntity(RelationTypeDto dto)
         {
-            var entity = new RelationType(dto.ChildObjectType, dto.ParentObjectType, dto.Alias)
+            var entity = new RelationType(dto.ChildObjectType, dto.ParentObjectType, dto.Alias);
+
+            try
             {
-                Id = dto.Id,
-                IsBidirectional = dto.Dual,
-                Name = dto.Name
-            };
-            //on initial construction we don't want to have dirty properties tracked
-            // http://issues.umbraco.org/issue/U4-1946
-            entity.ResetDirtyProperties(false);
-            return entity;
+                entity.DisableChangeTracking();
+
+                entity.Id = dto.Id;
+                entity.IsBidirectional = dto.Dual;
+                entity.Name = dto.Name;
+
+                //on initial construction we don't want to have dirty properties tracked
+                // http://issues.umbraco.org/issue/U4-1946
+                entity.ResetDirtyProperties(false);
+                return entity;
+            }
+            finally
+            {
+                entity.EnableChangeTracking();
+            }
         }
 
         public RelationTypeDto BuildDto(IRelationType entity)

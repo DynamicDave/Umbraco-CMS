@@ -2,22 +2,19 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Linq.Expressions;
 using System.Text;
 using System.Xml.Linq;
-using Umbraco.Core.Configuration;
-using Umbraco.Core.IO;
+using Umbraco.Core.Configuration.UmbracoSettings;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Models.EntityBase;
 using Umbraco.Core.Models;
 using Umbraco.Core.Models.Rdbms;
-using Umbraco.Core.Persistence.Caching;
+using Umbraco.Core.Cache;
 using Umbraco.Core.Persistence.DatabaseModelDefinitions;
 using Umbraco.Core.Persistence.Factories;
 using Umbraco.Core.Persistence.Querying;
-using Umbraco.Core.Persistence.Relators;
 using Umbraco.Core.Persistence.SqlSyntax;
 using Umbraco.Core.Persistence.UnitOfWork;
-using Umbraco.Core.Dynamics;
 
 namespace Umbraco.Core.Persistence.Repositories
 {
@@ -32,28 +29,16 @@ namespace Umbraco.Core.Persistence.Repositories
         private readonly ContentXmlRepository<IMember> _contentXmlRepository;
         private readonly ContentPreviewRepository<IMember> _contentPreviewRepository;
 
-        public MemberRepository(IDatabaseUnitOfWork work, IMemberTypeRepository memberTypeRepository, IMemberGroupRepository memberGroupRepository, ITagRepository tagRepository)
-            : base(work)
+        public MemberRepository(IDatabaseUnitOfWork work, CacheHelper cache, ILogger logger, ISqlSyntaxProvider sqlSyntax, IMemberTypeRepository memberTypeRepository, IMemberGroupRepository memberGroupRepository, ITagRepository tagRepository, IContentSection contentSection)
+            : base(work, cache, logger, sqlSyntax, contentSection)
         {
             if (memberTypeRepository == null) throw new ArgumentNullException("memberTypeRepository");
             if (tagRepository == null) throw new ArgumentNullException("tagRepository");
             _memberTypeRepository = memberTypeRepository;
             _tagRepository = tagRepository;
             _memberGroupRepository = memberGroupRepository;
-            _contentXmlRepository = new ContentXmlRepository<IMember>(work, NullCacheProvider.Current);
-            _contentPreviewRepository = new ContentPreviewRepository<IMember>(work, NullCacheProvider.Current);
-        }
-
-        public MemberRepository(IDatabaseUnitOfWork work, IRepositoryCacheProvider cache, IMemberTypeRepository memberTypeRepository, IMemberGroupRepository memberGroupRepository, ITagRepository tagRepository)
-            : base(work, cache)
-        {
-            if (memberTypeRepository == null) throw new ArgumentNullException("memberTypeRepository");
-            if (tagRepository == null) throw new ArgumentNullException("tagRepository");
-            _memberTypeRepository = memberTypeRepository;
-            _tagRepository = tagRepository;
-            _memberGroupRepository = memberGroupRepository;
-            _contentXmlRepository = new ContentXmlRepository<IMember>(work, NullCacheProvider.Current);
-            _contentPreviewRepository = new ContentPreviewRepository<IMember>(work, NullCacheProvider.Current);
+            _contentXmlRepository = new ContentXmlRepository<IMember>(work, CacheHelper.CreateDisabledCacheHelper(), logger, sqlSyntax);
+            _contentPreviewRepository = new ContentPreviewRepository<IMember>(work, CacheHelper.CreateDisabledCacheHelper(), logger, sqlSyntax);
         }
 
         #region Overrides of RepositoryBase<int, IMembershipUser>
@@ -62,14 +47,14 @@ namespace Umbraco.Core.Persistence.Repositories
         {
             var sql = GetBaseQuery(false);
             sql.Where(GetBaseWhereClause(), new { Id = id });
-            sql.OrderByDescending<ContentVersionDto>(x => x.VersionDate);
+            sql.OrderByDescending<ContentVersionDto>(x => x.VersionDate, SqlSyntax);
 
-            var dto = Database.Fetch<MemberDto, ContentVersionDto, ContentDto, NodeDto>(sql).FirstOrDefault();
+            var dto = Database.Fetch<MemberDto, ContentVersionDto, ContentDto, NodeDto>(SqlSyntax.SelectTop(sql, 1)).FirstOrDefault();
 
             if (dto == null)
                 return null;
 
-            var content = CreateMemberFromDto(dto, dto.ContentVersionDto.VersionId, sql);
+            var content = CreateMemberFromDto(dto, sql);
 
             return content;
 
@@ -83,8 +68,8 @@ namespace Umbraco.Core.Persistence.Repositories
                 sql.Where("umbracoNode.id in (@ids)", new { ids = ids });
             }
 
-            return ProcessQuery(sql);
-            
+            return ProcessQuery(sql, new PagingSqlQuery(sql));
+
         }
 
         protected override IEnumerable<IMember> PerformGetByQuery(IQuery<IMember> query)
@@ -105,7 +90,7 @@ namespace Umbraco.Core.Persistence.Repositories
                 baseQuery.Append(new Sql("WHERE umbracoNode.id IN (" + sql.SQL + ")", sql.Arguments))
                     .OrderBy<NodeDto>(x => x.SortOrder);
 
-                return ProcessQuery(baseQuery);    
+                return ProcessQuery(baseQuery, new PagingSqlQuery(baseQuery));
             }
             else
             {
@@ -113,7 +98,7 @@ namespace Umbraco.Core.Persistence.Repositories
                 var sql = translator.Translate()
                     .OrderBy<NodeDto>(x => x.SortOrder);
 
-                return ProcessQuery(sql);    
+                return ProcessQuery(sql, new PagingSqlQuery(sql));
             }
 
         }
@@ -122,24 +107,29 @@ namespace Umbraco.Core.Persistence.Repositories
 
         #region Overrides of PetaPocoRepositoryBase<int,IMembershipUser>
 
-        protected override Sql GetBaseQuery(bool isCount)
+        protected override Sql GetBaseQuery(BaseQueryType queryType)
         {
             var sql = new Sql();
-            sql.Select(isCount ? "COUNT(*)" : "*")
-                .From<MemberDto>()
-                .InnerJoin<ContentVersionDto>()
-                .On<ContentVersionDto, MemberDto>(left => left.NodeId, right => right.NodeId)                
-                .InnerJoin<ContentDto>()
-                .On<ContentVersionDto, ContentDto>(left => left.NodeId, right => right.NodeId)
+            sql.Select(queryType == BaseQueryType.Count ? "COUNT(*)" : (queryType == BaseQueryType.Ids ? "cmsMember.nodeId" : "*"))
+                .From<MemberDto>(SqlSyntax)
+                .InnerJoin<ContentVersionDto>(SqlSyntax)
+                .On<ContentVersionDto, MemberDto>(SqlSyntax, left => left.NodeId, right => right.NodeId)
+                .InnerJoin<ContentDto>(SqlSyntax)
+                .On<ContentVersionDto, ContentDto>(SqlSyntax, left => left.NodeId, right => right.NodeId)
                 //We're joining the type so we can do a query against the member type - not sure if this adds much overhead or not?
                 // the execution plan says it doesn't so we'll go with that and in that case, it might be worth joining the content
                 // types by default on the document and media repo's so we can query by content type there too.
-                .InnerJoin<ContentTypeDto>().On<ContentTypeDto, ContentDto>(left => left.NodeId, right => right.ContentTypeId)
-                .InnerJoin<NodeDto>()
-                .On<ContentDto, NodeDto>(left => left.NodeId, right => right.NodeId)
-                .Where<NodeDto>(x => x.NodeObjectType == NodeObjectTypeId);
+                .InnerJoin<ContentTypeDto>(SqlSyntax)
+                .On<ContentTypeDto, ContentDto>(SqlSyntax, left => left.NodeId, right => right.ContentTypeId)
+                .InnerJoin<NodeDto>(SqlSyntax)
+                .On<ContentDto, NodeDto>(SqlSyntax, left => left.NodeId, right => right.NodeId)
+                .Where<NodeDto>(x => x.NodeObjectType == NodeObjectTypeId, SqlSyntax);
             return sql;
+        }
 
+        protected override Sql GetBaseQuery(bool isCount)
+        {
+            return GetBaseQuery(isCount ? BaseQueryType.Count : BaseQueryType.FullSingle);
         }
 
         protected override string GetBaseWhereClause()
@@ -279,7 +269,7 @@ namespace Umbraco.Core.Persistence.Repositories
             //Ensure that strings don't contain characters that are invalid in XML
             entity.SanitizeEntityPropertiesForXmlStorage();
 
-            var dirtyEntity = (ICanBeDirty) entity;
+            var dirtyEntity = (ICanBeDirty)entity;
 
             //Look up parent to get and set the correct Path and update SortOrder if ParentId has changed
             if (dirtyEntity.IsPropertyDirty("ParentId"))
@@ -318,9 +308,9 @@ namespace Umbraco.Core.Persistence.Repositories
             //Updates the current version - cmsContentVersion
             //Assumes a Version guid exists and Version date (modified date) has been set/updated
             Database.Update(dto.ContentVersionDto);
-            
+
             //Updates the cmsMember entry if it has changed
-            
+
             //NOTE: these cols are the REAL column names in the db
             var changedCols = new List<string>();
 
@@ -340,13 +330,13 @@ namespace Umbraco.Core.Persistence.Repositories
             //only update the changed cols
             if (changedCols.Count > 0)
             {
-                Database.Update(dto, changedCols);    
+                Database.Update(dto, changedCols);
             }
 
             //TODO ContentType for the Member entity
 
             //Create the PropertyData for this version - cmsPropertyData
-            var propertyFactory = new PropertyFactory(entity.ContentType.CompositionPropertyTypes.ToArray(), entity.Version, entity.Id);            
+            var propertyFactory = new PropertyFactory(entity.ContentType.CompositionPropertyTypes.ToArray(), entity.Version, entity.Id);
             var keyDictionary = new Dictionary<int, int>();
 
             //Add Properties
@@ -375,6 +365,8 @@ namespace Umbraco.Core.Persistence.Repositories
             {
                 foreach (var property in ((Member)entity).Properties)
                 {
+                    if (keyDictionary.ContainsKey(property.PropertyTypeId) == false) continue;
+
                     property.Id = keyDictionary[property.PropertyTypeId];
                 }
             }
@@ -384,122 +376,62 @@ namespace Umbraco.Core.Persistence.Repositories
             dirtyEntity.ResetDirtyProperties();
         }
 
-        protected override void PersistDeletedItem(IMember entity)
-        {
-            var fs = FileSystemProviderManager.Current.GetFileSystemProvider<MediaFileSystem>();
-            var uploadFieldAlias = Constants.PropertyEditors.UploadFieldAlias;
-            //Loop through properties to check if the media item contains images/file that should be deleted
-            foreach (var property in ((Member)entity).Properties)
-            {
-                if (property.PropertyType.PropertyEditorAlias == uploadFieldAlias &&
-                    string.IsNullOrEmpty(property.Value.ToString()) == false
-                    && fs.FileExists(fs.GetRelativePath(property.Value.ToString())))
-                {
-                    var relativeFilePath = fs.GetRelativePath(property.Value.ToString());
-                    var parentDirectory = System.IO.Path.GetDirectoryName(relativeFilePath);
-
-                    // don't want to delete the media folder if not using directories.
-                    if (UmbracoConfig.For.UmbracoSettings().Content.UploadAllowDirectories && parentDirectory != fs.GetRelativePath("/"))
-                    {
-                        //issue U4-771: if there is a parent directory the recursive parameter should be true
-                        fs.DeleteDirectory(parentDirectory, String.IsNullOrEmpty(parentDirectory) == false);
-                    }
-                    else
-                    {
-                        fs.DeleteFile(relativeFilePath, true);
-                    }
-                }
-            }
-
-            base.PersistDeletedItem(entity);
-        }
-
         #endregion
 
         #region Overrides of VersionableRepositoryBase<IMembershipUser>
 
-        public void RebuildXmlStructures(Func<IMember, XElement> serializer, int groupSize = 5000, IEnumerable<int> contentTypeIds = null)
+        public override IEnumerable<IMember> GetAllVersions(int id)
         {
+            var sql = GetBaseQuery(false)
+                .Where(GetBaseWhereClause(), new { Id = id })
+                .OrderByDescending<ContentVersionDto>(x => x.VersionDate, SqlSyntax);
+            return ProcessQuery(sql, new PagingSqlQuery(sql), true);
+        }        
 
-            //Ok, now we need to remove the data and re-insert it, we'll do this all in one transaction too.
-            using (var tr = Database.GetTransaction())
+        public void RebuildXmlStructures(Func<IMember, XElement> serializer, int groupSize = 200, IEnumerable<int> contentTypeIds = null)
+        {
+            // the previous way of doing this was to run it all in one big transaction,
+            // and to bulk-insert groups of xml rows - which works, until the transaction
+            // times out - and besides, because v7 transactions are ReadCommited, it does
+            // not bring much safety - so this reverts to updating each record individually,
+            // and it may be slower in the end, but should be more resilient.
+
+            var baseId = 0;
+            var contentTypeIdsA = contentTypeIds == null ? new int[0] : contentTypeIds.ToArray();
+            while (true)
             {
-                //Remove all the data first, if anything fails after this it's no problem the transaction will be reverted
-                if (contentTypeIds == null)
-                {
-                    var memberObjectType = Guid.Parse(Constants.ObjectTypes.Member);
-                    var subQuery = new Sql()
-                        .Select("DISTINCT cmsContentXml.nodeId")
-                        .From<ContentXmlDto>()
-                        .InnerJoin<NodeDto>()
-                        .On<ContentXmlDto, NodeDto>(left => left.NodeId, right => right.NodeId)
-                        .Where<NodeDto>(dto => dto.NodeObjectType == memberObjectType);
+                // get the next group of nodes
+                var query = GetBaseQuery(false);
+                if (contentTypeIdsA.Length > 0)
+                    query = query
+                        .WhereIn<ContentDto>(x => x.ContentTypeId, contentTypeIdsA, SqlSyntax);
+                query = query
+                    .Where<NodeDto>(x => x.NodeId > baseId)
+                    .OrderBy<NodeDto>(x => x.NodeId, SqlSyntax);
+                var sql = SqlSyntax.SelectTop(query, groupSize);
+                var xmlItems = ProcessQuery(sql, new PagingSqlQuery(sql))
+                    .Select(x => new ContentXmlDto { NodeId = x.Id, Xml = serializer(x).ToString() })
+                    .ToList();
 
-                    var deleteSql = SqlSyntaxContext.SqlSyntaxProvider.GetDeleteSubquery("cmsContentXml", "nodeId", subQuery);
-                    Database.Execute(deleteSql);
-                }
-                else
+                // no more nodes, break
+                if (xmlItems.Count == 0) break;
+
+                foreach (var xmlItem in xmlItems)
                 {
-                    foreach (var id in contentTypeIds)
+                    try
                     {
-                        var id1 = id;
-                        var memberObjectType = Guid.Parse(Constants.ObjectTypes.Member);
-                        var subQuery = new Sql()
-                            .Select("DISTINCT cmsContentXml.nodeId")
-                            .From<ContentXmlDto>()
-                            .InnerJoin<NodeDto>()
-                            .On<ContentXmlDto, NodeDto>(left => left.NodeId, right => right.NodeId)
-                            .InnerJoin<ContentDto>()
-                            .On<ContentDto, NodeDto>(left => left.NodeId, right => right.NodeId)
-                            .Where<NodeDto>(dto => dto.NodeObjectType == memberObjectType)
-                            .Where<ContentDto>(dto => dto.ContentTypeId == id1);
-
-                        var deleteSql = SqlSyntaxContext.SqlSyntaxProvider.GetDeleteSubquery("cmsContentXml", "nodeId", subQuery);
-                        Database.Execute(deleteSql);
+                        // InsertOrUpdate tries to update first, which is good since it is what
+                        // should happen in most cases, then it tries to insert, and it should work
+                        // unless the node has been deleted, and we just report the exception
+                        Database.InsertOrUpdate(xmlItem);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Error<MediaRepository>("Could not rebuild XML for nodeId=" + xmlItem.NodeId, e);
                     }
                 }
-
-                //now insert the data, again if something fails here, the whole transaction is reversed
-                if (contentTypeIds == null)
-                {
-                    var query = Query<IMember>.Builder;
-                    RebuildXmlStructuresProcessQuery(serializer, query, tr, groupSize);
-                }
-                else
-                {
-                    foreach (var contentTypeId in contentTypeIds)
-                    {
-                        //copy local
-                        var id = contentTypeId;
-                        var query = Query<IMember>.Builder.Where(x => x.ContentTypeId == id && x.Trashed == false);
-                        RebuildXmlStructuresProcessQuery(serializer, query, tr, groupSize);
-                    }
-                }
-
-                tr.Complete();
+                baseId = xmlItems.Last().NodeId;
             }
-        }
-
-        private void RebuildXmlStructuresProcessQuery(Func<IMember, XElement> serializer, IQuery<IMember> query, Transaction tr, int pageSize)
-        {
-            var pageIndex = 0;
-            var total = int.MinValue;
-            var processed = 0;
-            do
-            {
-                var descendants = GetPagedResultsByQuery(query, pageIndex, pageSize, out total, "Path", Direction.Ascending);
-
-                var xmlItems = (from descendant in descendants
-                                let xml = serializer(descendant)
-                                select new ContentXmlDto { NodeId = descendant.Id, Xml = xml.ToString(SaveOptions.None) }).ToArray();
-
-                //bulk insert it into the database
-                Database.BulkInsertRecords(xmlItems, tr);
-
-                processed += xmlItems.Length;
-
-                pageIndex++;
-            } while (processed < total);
         }
 
         public override IMember GetByVersion(Guid versionId)
@@ -516,16 +448,16 @@ namespace Umbraco.Core.Persistence.Repositories
             var memberType = _memberTypeRepository.Get(dto.ContentVersionDto.ContentDto.ContentTypeId);
 
             var factory = new MemberFactory(memberType, NodeObjectTypeId, dto.NodeId);
-            var media = factory.BuildEntity(dto);
+            var member = factory.BuildEntity(dto);
 
-            var properties = GetPropertyCollection(sql, new[] { new DocumentDefinition(dto.NodeId, dto.ContentVersionDto.VersionId, media.UpdateDate, media.CreateDate, memberType) });
+            var properties = GetPropertyCollection(new PagingSqlQuery(sql), new[] { new DocumentDefinition(dto.ContentVersionDto, memberType) });
 
-            media.Properties = properties[dto.NodeId];
+            member.Properties = properties[dto.ContentVersionDto.VersionId];
 
             //on initial construction we don't want to have dirty properties tracked
             // http://issues.umbraco.org/issue/U4-1946
-            ((Entity)media).ResetDirtyProperties(false);
-            return media;
+            ((Entity)member).ResetDirtyProperties(false);
+            return member;
 
         }
 
@@ -599,7 +531,7 @@ namespace Umbraco.Core.Persistence.Repositories
             var grpQry = new Query<IMemberGroup>().Where(group => group.Name.Equals(groupName));
             var memberGroup = _memberGroupRepository.GetByQuery(grpQry).FirstOrDefault();
             if (memberGroup == null) return Enumerable.Empty<IMember>();
-            
+
             var subQuery = new Sql().Select("Member").From<Member2MemberGroupDto>().Where<Member2MemberGroupDto>(dto => dto.MemberGroup == memberGroup.Id);
 
             var sql = GetBaseQuery(false)
@@ -608,8 +540,8 @@ namespace Umbraco.Core.Persistence.Repositories
                 .Append(new Sql("WHERE umbracoNode.id IN (" + subQuery.SQL + ")", subQuery.Arguments))
                 .OrderByDescending<ContentVersionDto>(x => x.VersionDate)
                 .OrderBy<NodeDto>(x => x.SortOrder);
-            
-            return ProcessQuery(sql);
+
+            return ProcessQuery(sql, new PagingSqlQuery(sql));
 
         }
 
@@ -633,7 +565,7 @@ namespace Umbraco.Core.Persistence.Repositories
             //get the COUNT base query
             var fullSql = GetBaseQuery(true)
                 .Append(new Sql("WHERE umbracoNode.id IN (" + sql.SQL + ")", sql.Arguments));
-            
+
             return Database.ExecuteScalar<int>(fullSql);
         }
 
@@ -643,36 +575,60 @@ namespace Umbraco.Core.Persistence.Repositories
         /// <param name="query">
         /// The where clause, if this is null all records are queried
         /// </param>
-        /// <param name="pageIndex"></param>
-        /// <param name="pageSize"></param>
-        /// <param name="totalRecords"></param>
-        /// <param name="orderBy"></param>
-        /// <param name="orderDirection"></param>
-        /// <param name="filter"></param>
+        /// <param name="pageIndex">Index of the page.</param>
+        /// <param name="pageSize">Size of the page.</param>
+        /// <param name="totalRecords">The total records.</param>
+        /// <param name="orderBy">The order by column</param>
+        /// <param name="orderDirection">The order direction.</param>
+        /// <param name="orderBySystemField">Flag to indicate when ordering by system field</param>
+        /// <param name="filter">Search query</param>
         /// <returns></returns>
         /// <remarks>
         /// The query supplied will ONLY work with data specifically on the cmsMember table because we are using PetaPoco paging (SQL paging)
         /// </remarks>
-        public IEnumerable<IMember> GetPagedResultsByQuery(IQuery<IMember> query, int pageIndex, int pageSize, out int totalRecords,
-            string orderBy, Direction orderDirection, string filter = "")
+        public IEnumerable<IMember> GetPagedResultsByQuery(IQuery<IMember> query, long pageIndex, int pageSize, out long totalRecords,
+            string orderBy, Direction orderDirection, bool orderBySystemField, string filter = "")
         {
             var args = new List<object>();
             var sbWhere = new StringBuilder();
             Func<Tuple<string, object[]>> filterCallback = null;
             if (filter.IsNullOrWhiteSpace() == false)
             {
-                sbWhere.Append("AND ((umbracoNode. " + SqlSyntaxContext.SqlSyntaxProvider.GetQuotedColumnName("text") + " LIKE @" + args.Count + ") " +
-                                "OR (cmsMember.LoginName LIKE @0" + args.Count + "))");
-                args.Add("%" + filter + "%");
+                //This will build up the where clause - even though the same 'filter' is being
+                //applied to both columns, the parameters values passed to PetaPoco need to be 
+                //duplicated, otherwise it gets confused :/ 
+                var columnFilters = new List<Tuple<string, string>>
+                {
+                    new Tuple<string, string>("umbracoNode", "text"),
+                    new Tuple<string, string>("cmsMember", "LoginName")
+                };
+                sbWhere.Append("AND (");
+                for (int i = 0; i < columnFilters.Count; i++)
+                {
+                    sbWhere
+                        .Append("(")
+                        .Append(SqlSyntax.GetQuotedTableName(columnFilters[i].Item1))
+                        .Append(".")
+                        .Append(SqlSyntax.GetQuotedColumnName(columnFilters[i].Item2))
+                        .Append(" LIKE @")
+                        .Append(args.Count)
+                        .Append(") ");
+                    args.Add(string.Format("%{0}%", filter));
+                    if (i < (columnFilters.Count - 1))
+                    {
+                        sbWhere.Append("OR ");
+                    }
+                }
+                sbWhere.Append(")");
                 filterCallback = () => new Tuple<string, object[]>(sbWhere.ToString().Trim(), args.ToArray());
-            }           
+            }
 
-            return GetPagedResultsByQuery<MemberDto, Member>(query, pageIndex, pageSize, out totalRecords,
+            return GetPagedResultsByQuery<MemberDto>(query, pageIndex, pageSize, out totalRecords,
                 new Tuple<string, string>("cmsMember", "nodeId"),
-                ProcessQuery, orderBy, orderDirection,
+                (sqlFull, sqlIds) => ProcessQuery(sqlFull, sqlIds), orderBy, orderDirection, orderBySystemField,
                 filterCallback);
         }
-        
+
         public void AddOrUpdateContentXml(IMember content, Func<IMember, XElement> xml)
         {
             _contentXmlRepository.AddOrUpdate(new ContentXmlEntity<IMember>(content, xml));
@@ -709,83 +665,113 @@ namespace Umbraco.Core.Persistence.Repositories
             return base.GetEntityPropertyNameForOrderBy(orderBy);
         }
 
-        private IEnumerable<IMember> ProcessQuery(Sql sql)
-        {
-            //NOTE: This doesn't allow properties to be part of the query
-            var dtos = Database.Fetch<MemberDto, ContentVersionDto, ContentDto, NodeDto>(sql);
-
-            //content types
-            var contentTypes = _memberTypeRepository.GetAll(dtos.Select(x => x.ContentVersionDto.ContentDto.ContentTypeId).ToArray()).ToArray();
-
-            var dtosWithContentTypes = dtos
-                //This select into and null check are required because we don't have a foreign damn key on the contentType column
-                // http://issues.umbraco.org/issue/U4-5503
-                .Select(x => new {dto = x, contentType = contentTypes.FirstOrDefault(ct => ct.Id == x.ContentVersionDto.ContentDto.ContentTypeId)})
-                .Where(x => x.contentType != null)
-                .ToArray();
-
-            //Go get the property data for each document
-            IEnumerable<DocumentDefinition> docDefs = dtosWithContentTypes.Select(d => new DocumentDefinition(
-                d.dto.NodeId,
-                d.dto.ContentVersionDto.VersionId,
-                d.dto.ContentVersionDto.VersionDate,
-                d.dto.ContentVersionDto.ContentDto.NodeDto.CreateDate,
-                d.contentType));
-
-            var propertyData = GetPropertyCollection(sql, docDefs); 
-
-            return dtosWithContentTypes.Select(d => CreateMemberFromDto(
-                        d.dto,
-                        contentTypes.First(ct => ct.Id == d.dto.ContentVersionDto.ContentDto.ContentTypeId),
-                        propertyData[d.dto.NodeId])); 
-        }
-
         /// <summary>
-        /// Private method to create a member object from a MemberDto
+        /// This is the underlying method that processes most queries for this repository
         /// </summary>
-        /// <param name="dto"></param>
-        /// <param name="contentType"></param>
-        /// <param name="propCollection"></param>
+        /// <param name="sqlFull">
+        /// The full SQL to select all member data 
+        /// </param>
+        /// <param name="pagingSqlQuery">
+        /// The Id SQL to just return all member ids - used to process the properties for the member item
+        /// </param>
+        /// <param name="withCache"></param>
         /// <returns></returns>
-        private IMember CreateMemberFromDto(MemberDto dto,
-            IMemberType contentType,
-            PropertyCollection propCollection)
+        private IEnumerable<IMember> ProcessQuery(Sql sqlFull, PagingSqlQuery pagingSqlQuery, bool withCache = false)
         {
-            var factory = new MemberFactory(contentType, NodeObjectTypeId, dto.ContentVersionDto.NodeId);
-            var member = factory.BuildEntity(dto);
+            // fetch returns a list so it's ok to iterate it in this method
+            var dtos = Database.Fetch<MemberDto, ContentVersionDto, ContentDto, NodeDto>(sqlFull);
 
-            member.Properties = propCollection;
+            //This is a tuple list identifying if the content item came from the cache or not
+            var content = new List<Tuple<IMember, bool>>();
+            var defs = new DocumentDefinitionCollection();
 
-            //on initial construction we don't want to have dirty properties tracked
-            // http://issues.umbraco.org/issue/U4-1946
-            ((Entity)member).ResetDirtyProperties(false);
-            return member;
+            foreach (var dto in dtos)
+            {
+                // if the cache contains the item, use it
+                if (withCache)
+                {
+                    var cached = RuntimeCache.GetCacheItem<IMember>(GetCacheIdKey<IMember>(dto.NodeId));
+                    //only use this cached version if the dto returned is the same version - this is just a safety check, members dont 
+                    //store different versions, but just in case someone corrupts some data we'll double check to be sure.
+                    if (cached != null && cached.Version == dto.ContentVersionDto.VersionId)
+                    {
+                        content.Add(new Tuple<IMember, bool>(cached, true));
+                        continue;
+                    }
+                }
+
+                // else, need to fetch from the database
+                // content type repository is full-cache so OK to get each one independently
+                var contentType = _memberTypeRepository.Get(dto.ContentVersionDto.ContentDto.ContentTypeId);
+
+                // need properties
+                if (defs.AddOrUpdate(new DocumentDefinition(dto.ContentVersionDto, contentType)))
+                {
+                    content.Add(new Tuple<IMember, bool>(MemberFactory.BuildEntity(dto, contentType), false));
+                }
+            }
+
+            // load all properties for all documents from database in 1 query
+            var propertyData = GetPropertyCollection(pagingSqlQuery, defs);
+
+            // assign property data
+            foreach (var contentItem in content)
+            {
+                var cc = contentItem.Item1;
+                var fromCache = contentItem.Item2;
+
+                //if this has come from cache, we do not need to build up it's structure
+                if (fromCache) continue;
+
+                cc.Properties = propertyData[cc.Version];
+
+                //on initial construction we don't want to have dirty properties tracked
+                // http://issues.umbraco.org/issue/U4-1946
+                cc.ResetDirtyProperties(false);
+            }
+
+            return content.Select(x => x.Item1).ToArray();
         }
 
         /// <summary>
         /// Private method to create a member object from a MemberDto
         /// </summary>
         /// <param name="dto"></param>
-        /// <param name="versionId"></param>
         /// <param name="docSql"></param>
         /// <returns></returns>
-        private IMember CreateMemberFromDto(MemberDto dto, Guid versionId, Sql docSql)
+        private IMember CreateMemberFromDto(MemberDto dto, Sql docSql)
         {
             var memberType = _memberTypeRepository.Get(dto.ContentVersionDto.ContentDto.ContentTypeId);
 
             var factory = new MemberFactory(memberType, NodeObjectTypeId, dto.ContentVersionDto.NodeId);
             var member = factory.BuildEntity(dto);
 
-            var docDef = new DocumentDefinition(dto.ContentVersionDto.NodeId, versionId, member.UpdateDate, member.CreateDate, memberType);
+            var docDef = new DocumentDefinition(dto.ContentVersionDto, memberType);
 
             var properties = GetPropertyCollection(docSql, new[] { docDef });
 
-            member.Properties = properties[dto.ContentVersionDto.NodeId];
+            member.Properties = properties[dto.ContentVersionDto.VersionId];
 
             //on initial construction we don't want to have dirty properties tracked
             // http://issues.umbraco.org/issue/U4-1946
             ((Entity)member).ResetDirtyProperties(false);
             return member;
         }
+
+        /// <summary>
+        /// Dispose disposable properties
+        /// </summary>
+        /// <remarks>
+        /// Ensure the unit of work is disposed
+        /// </remarks>
+        protected override void DisposeResources()
+        {
+            _memberTypeRepository.Dispose();
+            _tagRepository.Dispose();
+            _memberGroupRepository.Dispose();
+            _contentXmlRepository.Dispose();
+            _contentPreviewRepository.Dispose();
+        }
+
     }
 }

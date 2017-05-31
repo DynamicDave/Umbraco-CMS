@@ -1,6 +1,11 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
+using Moq;
 using NUnit.Framework;
+using Umbraco.Core;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Models;
+
 using Umbraco.Core.Persistence.Repositories;
 using Umbraco.Core.Persistence.UnitOfWork;
 using Umbraco.Tests.TestHelpers;
@@ -21,9 +26,9 @@ namespace Umbraco.Tests.Services
         {            
             base.CreateTestData();
 
-            var provider = new PetaPocoUnitOfWorkProvider();
+            var provider = new PetaPocoUnitOfWorkProvider(Logger);
             using (var unitOfWork = provider.GetUnitOfWork())
-            using (var repository = new MacroRepository(unitOfWork))
+            using (var repository = new MacroRepository(unitOfWork, CacheHelper.CreateDisabledCacheHelper(), Mock.Of<ILogger>(), SqlSyntax))
             {
                 repository.AddOrUpdate(new Macro("test1", "Test1", "~/usercontrol/test1.ascx", "MyAssembly1", "test1.xslt", "~/views/macropartials/test1.cshtml"));
                 repository.AddOrUpdate(new Macro("test2", "Test2", "~/usercontrol/test2.ascx", "MyAssembly2", "test2.xslt", "~/views/macropartials/test2.cshtml"));
@@ -211,6 +216,17 @@ namespace Umbraco.Tests.Services
             result1 = macroService.GetById(result1.Id);
             Assert.AreEqual(2, result1.Properties.Count());
 
+        }
+
+        [Test]
+        public void Cannot_Save_Macro_With_Empty_Name()
+        {
+            // Arrange
+            var macroService = ServiceContext.MacroService;
+            var macro = new Macro("test", string.Empty, scriptPath: "~/Views/MacroPartials/Test.cshtml", cacheDuration: 1234);
+            
+            // Act & Assert
+            Assert.Throws<ArgumentException>(() => macroService.Save(macro));
         }
 
         //[Test]

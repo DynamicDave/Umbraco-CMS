@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using Umbraco.Core.Models.Membership;
@@ -6,7 +7,7 @@ using Umbraco.Core.Models.Rdbms;
 
 namespace Umbraco.Core.Persistence.Factories
 {
-    internal class UserFactory : IEntityFactory<IUser, UserDto>
+    internal class UserFactory 
     {
         private readonly IUserType _userType;
 
@@ -20,31 +21,44 @@ namespace Umbraco.Core.Persistence.Factories
         public IUser BuildEntity(UserDto dto)
         {
             var guidId = dto.Id.ToGuid();
-            var user = new User(_userType)
-                {
-                    Id = dto.Id,
-                    Key = guidId,
-                    StartContentId = dto.ContentStartId,
-                    StartMediaId = dto.MediaStartId.HasValue ? dto.MediaStartId.Value : -1,
-                    RawPasswordValue = dto.Password,
-                    Username = dto.Login,
-                    Name = dto.UserName,
-                    IsLockedOut = dto.NoConsole,
-                    IsApproved = dto.Disabled == false,
-                    Email = dto.Email,
-                    Language = dto.UserLanguage
-                };
+            var user = new User(_userType);
 
-            foreach (var app in dto.User2AppDtos)
+            try
             {
-                user.AddAllowedSection(app.AppAlias);
+                user.DisableChangeTracking();
+
+                user.Id = dto.Id;
+                user.Key = guidId;
+                user.StartContentId = dto.ContentStartId;
+                user.StartMediaId = dto.MediaStartId.HasValue ? dto.MediaStartId.Value : -1;
+                user.RawPasswordValue = dto.Password;
+                user.Username = dto.Login;
+                user.Name = dto.UserName;
+                user.IsLockedOut = dto.NoConsole;
+                user.IsApproved = dto.Disabled == false;
+                user.Email = dto.Email;
+                user.Language = dto.UserLanguage;
+                user.SecurityStamp = dto.SecurityStampToken;
+                user.FailedPasswordAttempts = dto.FailedLoginAttempts ?? 0;
+                user.LastLockoutDate = dto.LastLockoutDate ?? DateTime.MinValue;
+                user.LastLoginDate = dto.LastLoginDate ?? DateTime.MinValue;
+                user.LastPasswordChangeDate = dto.LastPasswordChangeDate ?? DateTime.MinValue;
+
+                foreach (var app in dto.User2AppDtos)
+                {
+                    user.AddAllowedSection(app.AppAlias);
+                }
+
+                //on initial construction we don't want to have dirty properties tracked
+                // http://issues.umbraco.org/issue/U4-1946
+                user.ResetDirtyProperties(false);
+
+                return user;
             }
-
-            //on initial construction we don't want to have dirty properties tracked
-            // http://issues.umbraco.org/issue/U4-1946
-            user.ResetDirtyProperties(false);
-
-            return user;
+            finally
+            {
+                user.EnableChangeTracking();
+            }
         }
 
         public UserDto BuildDto(IUser entity)
@@ -61,7 +75,12 @@ namespace Umbraco.Core.Persistence.Factories
                               UserLanguage = entity.Language,
                               UserName = entity.Name,
                               Type = short.Parse(entity.UserType.Id.ToString(CultureInfo.InvariantCulture)),
-                              User2AppDtos = new List<User2AppDto>()
+                              User2AppDtos = new List<User2AppDto>(),
+                              SecurityStampToken = entity.SecurityStamp,
+                              FailedLoginAttempts = entity.FailedPasswordAttempts,
+                              LastLockoutDate = entity.LastLockoutDate == DateTime.MinValue ? (DateTime?)null : entity.LastLockoutDate,
+                              LastLoginDate = entity.LastLoginDate == DateTime.MinValue ? (DateTime?)null : entity.LastLoginDate,
+                              LastPasswordChangeDate = entity.LastPasswordChangeDate == DateTime.MinValue ? (DateTime?)null : entity.LastPasswordChangeDate,
                           };
 
             foreach (var app in entity.AllowedSections)

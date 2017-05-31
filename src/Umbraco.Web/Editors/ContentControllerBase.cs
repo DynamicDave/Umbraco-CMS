@@ -13,7 +13,7 @@ using Umbraco.Core.Services;
 using Umbraco.Web.Models.ContentEditing;
 using Umbraco.Web.WebApi;
 using Umbraco.Web.WebApi.Filters;
-using Umbraco.Core.Models;
+
 
 namespace Umbraco.Web.Editors
 {
@@ -21,7 +21,7 @@ namespace Umbraco.Web.Editors
     /// An abstract base controller used for media/content (and probably members) to try to reduce code replication.
     /// </summary>
     [OutgoingDateTimeFormat]
-    public abstract class ContentControllerBase : UmbracoAuthorizedJsonController
+    public abstract class ContentControllerBase : BackOfficeNotificationsController
     {
         /// <summary>
         /// Constructor
@@ -88,34 +88,37 @@ namespace Umbraco.Web.Editors
             where TPersisted : IContentBase
         {
             //Map the property values
-            foreach (var p in contentItem.ContentDto.Properties)
+            foreach (var property in contentItem.ContentDto.Properties)
             {
                 //get the dbo property
-                var dboProperty = contentItem.PersistedContent.Properties[p.Alias];
+                var dboProperty = contentItem.PersistedContent.Properties[property.Alias];
 
                 //create the property data to send to the property editor
-                var d = new Dictionary<string, object>();
+                var dictionary = new Dictionary<string, object>();
                 //add the files if any
-                var files = contentItem.UploadedFiles.Where(x => x.PropertyAlias == p.Alias).ToArray();
+                var files = contentItem.UploadedFiles.Where(x => x.PropertyAlias == property.Alias).ToArray();
+
+                foreach (var file in files)
+                    file.FileName = file.FileName.ToSafeFileName();
+
                 if (files.Any())
-                {
-                    d.Add("files", files);
-                }
-                var data = new ContentPropertyData(p.Value, p.PreValues, d);
+                    dictionary.Add("files", files);
+                
+                var data = new ContentPropertyData(property.Value, property.PreValues, dictionary);
 
                 //get the deserialized value from the property editor
-                if (p.PropertyEditor == null)
+                if (property.PropertyEditor == null)
                 {
-                    LogHelper.Warn<ContentController>("No property editor found for property " + p.Alias);
+                    LogHelper.Warn<ContentController>("No property editor found for property " + property.Alias);
                 }
                 else
                 {
-                    var valueEditor = p.PropertyEditor.ValueEditor;
+                    var valueEditor = property.PropertyEditor.ValueEditor;
                     //don't persist any bound value if the editor is readonly
                     if (valueEditor.IsReadOnly == false)
-                    {
-                        var propVal = p.PropertyEditor.ValueEditor.ConvertEditorToDb(data, dboProperty.Value);
-                        var supportTagsAttribute = TagExtractor.GetAttribute(p.PropertyEditor);
+                    {                        
+                        var propVal = property.PropertyEditor.ValueEditor.ConvertEditorToDb(data, dboProperty.Value);
+                        var supportTagsAttribute = TagExtractor.GetAttribute(property.PropertyEditor);
                         if (supportTagsAttribute != null)
                         {
                             TagExtractor.SetPropertyTags(dboProperty, data, propVal, supportTagsAttribute);
@@ -172,5 +175,19 @@ namespace Umbraco.Web.Editors
             return (action.ToString().EndsWith("New"));
         }
 
+        protected void AddCancelMessage(INotificationModel display, 
+            string header = "speechBubbles/operationCancelledHeader",             
+            string message = "speechBubbles/operationCancelledText",
+            bool localizeHeader = true,
+            bool localizeMessage = true)
+        {
+            //if there's already a default event message, don't add our default one
+            var msgs = UmbracoContext.GetCurrentEventMessages();
+            if (msgs != null && msgs.GetAll().Any(x => x.IsDefaultEventMessage)) return;
+
+            display.AddWarningNotification(
+                localizeHeader ? Services.TextService.Localize(header) : header,
+                localizeMessage ? Services.TextService.Localize(message): message);
+        }
     }
 }

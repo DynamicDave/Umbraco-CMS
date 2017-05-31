@@ -4,7 +4,7 @@ using Umbraco.Core.Models.Rdbms;
 
 namespace Umbraco.Core.Persistence.Factories
 {
-    internal class MemberGroupFactory : IEntityFactory<IMemberGroup, NodeDto>
+    internal class MemberGroupFactory 
     {
         
         private readonly Guid _nodeObjectTypeId;
@@ -18,18 +18,26 @@ namespace Umbraco.Core.Persistence.Factories
 
         public IMemberGroup BuildEntity(NodeDto dto)
         {
-            var template = new MemberGroup
+            var group = new MemberGroup();
+            
+            try
             {
-                CreateDate = dto.CreateDate,
-                Id = dto.NodeId,
-                Key = dto.UniqueId.Value,
-                Name = dto.Text                
-            };
+                group.DisableChangeTracking();
 
-            //on initial construction we don't want to have dirty properties tracked
-            // http://issues.umbraco.org/issue/U4-1946
-            template.ResetDirtyProperties(false);
-            return template;
+                group.CreateDate = dto.CreateDate;
+                group.Id = dto.NodeId;
+                group.Key = dto.UniqueId;
+                group.Name = dto.Text;
+
+                //on initial construction we don't want to have dirty properties tracked
+                // http://issues.umbraco.org/issue/U4-1946
+                group.ResetDirtyProperties(false);
+                return group;
+            }
+            finally
+            {
+                group.EnableChangeTracking();
+            }
         }
 
         public NodeDto BuildDto(IMemberGroup entity)

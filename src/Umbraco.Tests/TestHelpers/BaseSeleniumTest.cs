@@ -7,10 +7,12 @@ using System.Linq.Dynamic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Management;
+using Moq;
 using NUnit.Framework;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Firefox;
 using Umbraco.Core;
+using Umbraco.Core.Logging;
 using Umbraco.Core.Persistence;
 using Umbraco.Core.Persistence.Migrations.Initial;
 using Umbraco.Core.Persistence.SqlSyntax;
@@ -49,16 +51,19 @@ namespace Umbraco.Tests.TestHelpers
             var connectionString = string.Format(@"Data Source={0}", databaseDataPath);
 
             //Create the Sql CE database
-            var engine = new SqlCeEngine(connectionString);
-            if (File.Exists(databaseDataPath) == false)
-                engine.CreateDatabase();
+            using (var engine = new SqlCeEngine(connectionString))
+            {
+                if (File.Exists(databaseDataPath) == false)
+                    engine.CreateDatabase();
+            }
 
-            SqlSyntaxContext.SqlSyntaxProvider = new SqlCeSyntaxProvider();
+            var syntaxProvider = new SqlCeSyntaxProvider();
+            SqlSyntaxContext.SqlSyntaxProvider = syntaxProvider;
 
-            _database = new UmbracoDatabase(connectionString, "System.Data.SqlServerCe.4.0");
+            _database = new UmbracoDatabase(connectionString, Constants.DatabaseProviders.SqlCe, Mock.Of<ILogger>());
 
             // First remove anything in the database
-            var creation = new DatabaseSchemaCreation(_database);
+            var creation = new DatabaseSchemaCreation(_database, Mock.Of<ILogger>(), syntaxProvider);
             creation.UninstallDatabaseSchema();
 
             // Then populate it with fresh data

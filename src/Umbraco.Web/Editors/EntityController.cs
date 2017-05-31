@@ -4,29 +4,16 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Web.Http;
-using System.Web.Http.ModelBinding;
 using AutoMapper;
-using ClientDependency.Core;
-using Examine.LuceneEngine;
-using Examine.LuceneEngine.Providers;
-using Newtonsoft.Json;
 using Umbraco.Core;
-using Umbraco.Core.Logging;
 using Umbraco.Core.Models.Membership;
-using Umbraco.Core.Services;
 using Umbraco.Web.Models.ContentEditing;
 using Umbraco.Web.Mvc;
 using System.Linq;
-using Umbraco.Core.Models.EntityBase;
 using Umbraco.Core.Models;
-using Umbraco.Web.WebApi.Filters;
-using umbraco.cms.businesslogic.packager;
 using Constants = Umbraco.Core.Constants;
 using Examine;
-using Examine.LuceneEngine.SearchCriteria;
-using Examine.SearchCriteria;
 using Umbraco.Web.Dynamics;
-using umbraco;
 using System.Text.RegularExpressions;
 using Umbraco.Core.Xml;
 
@@ -42,6 +29,23 @@ namespace Umbraco.Web.Editors
     [PluginController("UmbracoApi")]
     public class EntityController : UmbracoAuthorizedJsonController
     {
+        /// <summary>
+        /// Returns an Umbraco alias given a string
+        /// </summary>
+        /// <param name="value"></param>
+        /// <param name="camelCase"></param>
+        /// <returns></returns>
+        public dynamic GetSafeAlias(string value, bool camelCase = true)
+        {
+            var returnValue = (string.IsNullOrWhiteSpace(value)) ? string.Empty : value.ToSafeAlias(camelCase);
+            dynamic returnObj = new System.Dynamic.ExpandoObject();
+            returnObj.alias = returnValue;
+            returnObj.original = value;
+            returnObj.camelCase = camelCase;
+
+            return returnObj;
+        }
+
         /// <summary>
         /// Searches for results based on the entity type
         /// </summary>
@@ -205,6 +209,17 @@ namespace Umbraco.Web.Editors
             return GetResultForChildren(id, type);
         }
 
+        /// <summary>
+        /// Get paged descendant entities by id
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="type"></param>
+        /// <param name="pageNumber"></param>
+        /// <param name="pageSize"></param>
+        /// <param name="orderBy"></param>
+        /// <param name="orderDirection"></param>
+        /// <param name="filter"></param>
+        /// <returns></returns>
         public IEnumerable<EntityBasic> GetAncestors(int id, UmbracoEntityTypes type)
         {
             return GetResultForAncestors(id, type);
@@ -282,7 +297,7 @@ namespace Umbraco.Web.Editors
                     throw new NotSupportedException("The " + typeof(EntityController) + " currently does not support searching against object type " + entityType);                    
             }
 
-            var internalSearcher = (LuceneSearcher)ExamineManager.Instance.SearchProviderCollection[searcher];
+            var internalSearcher = ExamineManager.Instance.SearchProviderCollection[searcher];
 
             //build a lucene query:
             // the __nodeName will be boosted 10x without wildcards
@@ -535,6 +550,11 @@ namespace Umbraco.Web.Editors
             //now we need to convert the unknown ones
             switch (entityType)
             {
+                case UmbracoEntityTypes.Template:
+                    var templates = Services.FileService.GetTemplates();
+                    var filteredTemplates = ExecutePostFilter(templates, postFilter, postFilterParams);
+                    return filteredTemplates.Select(Mapper.Map<EntityBasic>);
+
                 case UmbracoEntityTypes.Macro:                    
                     //Get all macros from the macro service
                     var macros = Services.MacroService.GetAll().WhereNotNull().OrderBy(x => x.Name);
@@ -592,7 +612,7 @@ namespace Umbraco.Web.Editors
                     .Select(Mapper.Map<EntityBasic>);
 
                 // entities are in "some" order, put them back in order
-                var xref = entities.ToDictionary(x => x.Id);
+                var xref = entities.ToDictionary(x => x.Key);
                 var result = keysArray.Select(x => xref.ContainsKey(x) ? xref[x] : null).Where(x => x != null);
 
                 return result;
@@ -717,8 +737,6 @@ namespace Umbraco.Web.Editors
                     return UmbracoObjectTypes.Media;
                 case UmbracoEntityTypes.MemberType:
                     return UmbracoObjectTypes.MediaType;
-                case UmbracoEntityTypes.Template:
-                    return UmbracoObjectTypes.Template;
                 case UmbracoEntityTypes.MemberGroup:
                     return UmbracoObjectTypes.MemberGroup;
                 case UmbracoEntityTypes.ContentItem:

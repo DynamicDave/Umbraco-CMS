@@ -33,6 +33,7 @@ namespace Umbraco.Core.Models
         private DataTypeDatabaseType _databaseType;
 
         [Obsolete("Property editor's are defined by a string alias from version 7 onwards, use the alternative contructor that specifies an alias")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
         public DataTypeDefinition(int parentId, Guid controlId)
         {
             _parentId = parentId;
@@ -47,6 +48,7 @@ namespace Umbraco.Core.Models
 
             _additionalData = new Dictionary<string, object>();
         }
+
         public DataTypeDefinition(int parentId, string propertyEditorAlias)
         {
             _parentId = parentId;
@@ -55,15 +57,28 @@ namespace Umbraco.Core.Models
             _additionalData = new Dictionary<string, object>();
         }
 
-        private static readonly PropertyInfo NameSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.Name);
-        private static readonly PropertyInfo ParentIdSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.ParentId);
-        private static readonly PropertyInfo SortOrderSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.SortOrder);
-        private static readonly PropertyInfo LevelSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.Level);
-        private static readonly PropertyInfo PathSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.Path);
-        private static readonly PropertyInfo UserIdSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.CreatorId);
-        private static readonly PropertyInfo TrashedSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, bool>(x => x.Trashed);
-        private static readonly PropertyInfo PropertyEditorAliasSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.PropertyEditorAlias);
-        private static readonly PropertyInfo DatabaseTypeSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, DataTypeDatabaseType>(x => x.DatabaseType);
+        public DataTypeDefinition(string propertyEditorAlias)
+        {
+            _parentId = -1;
+            _propertyEditorAlias = propertyEditorAlias;
+
+            _additionalData = new Dictionary<string, object>();
+        }
+
+        private static readonly Lazy<PropertySelectors> Ps = new Lazy<PropertySelectors>();
+
+        private class PropertySelectors
+        {
+            public readonly PropertyInfo NameSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.Name);
+            public readonly PropertyInfo ParentIdSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.ParentId);
+            public readonly PropertyInfo SortOrderSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.SortOrder);
+            public readonly PropertyInfo LevelSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.Level);
+            public readonly PropertyInfo PathSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.Path);
+            public readonly PropertyInfo UserIdSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, int>(x => x.CreatorId);
+            public readonly PropertyInfo TrashedSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, bool>(x => x.Trashed);
+            public readonly PropertyInfo PropertyEditorAliasSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, string>(x => x.PropertyEditorAlias);
+            public readonly PropertyInfo DatabaseTypeSelector = ExpressionHelper.GetPropertyInfo<DataTypeDefinition, DataTypeDatabaseType>(x => x.DatabaseType);
+        }
 
         /// <summary>
         /// Gets or sets the Id of the Parent entity
@@ -73,14 +88,7 @@ namespace Umbraco.Core.Models
         public int ParentId
         {
             get { return _parentId; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _parentId = value;
-                    return _parentId;
-                }, _parentId, ParentIdSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _parentId, Ps.Value.ParentIdSelector); }
         }
 
         /// <summary>
@@ -90,14 +98,7 @@ namespace Umbraco.Core.Models
         public string Name
         {
             get { return _name; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _name = value;
-                    return _name;
-                }, _name, NameSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _name, Ps.Value.NameSelector); }
         }
 
         /// <summary>
@@ -107,14 +108,7 @@ namespace Umbraco.Core.Models
         public int SortOrder
         {
             get { return _sortOrder; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _sortOrder = value;
-                    return _sortOrder;
-                }, _sortOrder, SortOrderSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _sortOrder, Ps.Value.SortOrderSelector); }
         }
 
         /// <summary>
@@ -124,14 +118,7 @@ namespace Umbraco.Core.Models
         public int Level
         {
             get { return _level; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _level = value;
-                    return _level;
-                }, _level, LevelSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _level, Ps.Value.LevelSelector); }
         }
 
         /// <summary>
@@ -141,14 +128,7 @@ namespace Umbraco.Core.Models
         public string Path //Setting this value should be handled by the class not the user
         {
             get { return _path; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _path = value;
-                    return _path;
-                }, _path, PathSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _path, Ps.Value.PathSelector); }
         }
 
         /// <summary>
@@ -158,14 +138,7 @@ namespace Umbraco.Core.Models
         public int CreatorId
         {
             get { return _creatorId; }
-            set
-            {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _creatorId = value;
-                    return _creatorId;
-                }, _creatorId, UserIdSelector);
-            }
+            set { SetPropertyValueAndDetectChanges(value, ref _creatorId, Ps.Value.UserIdSelector); }
         }
 
         //NOTE: SD: Why do we have this ??
@@ -179,11 +152,7 @@ namespace Umbraco.Core.Models
             get { return _trashed; }
             internal set
             {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _trashed = value;
-                    return _trashed;
-                }, _trashed, TrashedSelector);
+                SetPropertyValueAndDetectChanges(value, ref _trashed, Ps.Value.TrashedSelector);
                 //This is a custom property that is not exposed in IUmbracoEntity so add it to the additional data
                 _additionalData["Trashed"] = value;
             }
@@ -195,11 +164,7 @@ namespace Umbraco.Core.Models
             get { return _propertyEditorAlias; }
             set
             {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _propertyEditorAlias = value;
-                    return _propertyEditorAlias;
-                }, _propertyEditorAlias, PropertyEditorAliasSelector);
+                SetPropertyValueAndDetectChanges(value, ref _propertyEditorAlias, Ps.Value.PropertyEditorAliasSelector);
                 //This is a custom property that is not exposed in IUmbracoEntity so add it to the additional data
                 _additionalData["DatabaseType"] = value;
             }
@@ -235,12 +200,7 @@ namespace Umbraco.Core.Models
             get { return _databaseType; }
             set 
             {
-                SetPropertyValueAndDetectChanges(o =>
-                {
-                    _databaseType = value;
-                    return _databaseType;
-                }, _databaseType, DatabaseTypeSelector);
-
+                SetPropertyValueAndDetectChanges(value, ref _databaseType, Ps.Value.DatabaseTypeSelector);                
                 //This is a custom property that is not exposed in IUmbracoEntity so add it to the additional data
                 _additionalData["DatabaseType"] = value;
             }
@@ -254,19 +214,6 @@ namespace Umbraco.Core.Models
         IDictionary<string, object> IUmbracoEntity.AdditionalData
         {
             get { return _additionalData; }
-        }
-
-        /// <summary>
-        /// Some entities may expose additional data that other's might not, this custom data will be available in this collection
-        /// </summary>
-        public IDictionary<string, object> AdditionalData { get; private set; }
-
-        internal override void AddingEntity()
-        {
-            base.AddingEntity();
-
-            if(Key == default(Guid))
-                Key = Guid.NewGuid();
         }
     }
 }
